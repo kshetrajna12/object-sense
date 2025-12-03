@@ -1,5 +1,8 @@
 # CLAUDE.md - Project Instructions
 
+## Commit Preferences
+- Do NOT include "Co-Authored-By: Claude" or "Generated with Claude Code" in commits
+
 ## Project Overview
 Object Sense Engine — a semantic substrate that provides persistent object identity and type awareness beneath all other AI systems.
 
