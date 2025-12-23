@@ -1039,6 +1039,54 @@ It starts with:
 
 ---
 
+---
+
+## Implementation Decisions Log
+
+### 2024-12-22: Core Data Model Implementation
+
+Implemented SQLAlchemy models per concept_v1.md §3 and §9.
+
+**Decisions made:**
+
+1. **Vector dimensions: 1536**
+   - Used 1536-dimensional vectors for embeddings (OpenAI text-embedding-3-small default)
+   - Easily changeable via `Vector(dim)` parameter if we switch to different embedding models
+   - Affects: `Type.embedding`, `Signature.embedding`
+
+2. **ObjectEntityLink as explicit association table**
+   - concept_v1.md shows `entity_links: [FK → Entity]` on Object
+   - Implemented as separate `ObjectEntityLink` table with:
+     - Composite primary key (object_id, entity_id)
+     - Optional `role` field (e.g., "subject", "background", "depicted")
+   - Enables richer relationship metadata and bidirectional navigation
+
+3. **Signature.metadata → Signature.extra**
+   - Renamed to avoid collision with SQLAlchemy's `DeclarativeBase.metadata`
+   - Field stores modality-specific signature data (EXIF, duration, schema info, etc.)
+
+4. **Database initialization: simple create_all()**
+   - Using `Base.metadata.create_all()` for v0
+   - No Alembic migrations yet — acceptable for prototyping
+   - Will need migrations before production use
+
+5. **Async-first with asyncpg**
+   - All database operations async via SQLAlchemy 2.0 async API
+   - `async_sessionmaker` for session management
+   - FastAPI lifespan handler calls `init_db()` on startup
+
+**Tables created:**
+- `blobs` - Content-addressable storage (SHA256 dedup)
+- `types` - Semantic types with parent hierarchy, aliases, embeddings
+- `entities` - Persistent concepts with slots and confidence
+- `objects` - Observations with medium, primary_type, slots
+- `object_entity_links` - Many-to-many Object↔Entity
+- `evidence` - Belief provenance (polymorphic via subject_kind)
+- `signatures` - Modality-specific fingerprints
+- `type_evolution` - Type change history (alias, merge, split, deprecate)
+
+---
+
 ## Open Questions for Next Discussion
 
 (Add new questions as they arise)
