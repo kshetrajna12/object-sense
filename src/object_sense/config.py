@@ -12,8 +12,23 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    # Database
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/object_sense"
     database_echo: bool = False
+
+    # Sparkstation LLM Gateway
+    llm_base_url: str = "http://localhost:8000/v1"
+    llm_api_key: str = "dummy-key"
+
+    # Model names
+    model_chat: str = "qwen3-vl-4b"  # Vision + chat
+    model_reasoning: str = "gpt-oss-20b"  # Reasoning with traces
+    model_text_embedding: str = "bge-large"  # 1024-dim text embeddings
+    model_image_embedding: str = "clip-vit"  # 768-dim image embeddings
+
+    # Embedding dimensions (must match models)
+    dim_text_embedding: int = 1024
+    dim_image_embedding: int = 768
 
 
 settings = Settings()

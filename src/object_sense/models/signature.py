@@ -11,6 +11,7 @@ from sqlalchemy import DateTime, ForeignKey, String, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from object_sense.config import settings
 from object_sense.models.base import Base
 
 if TYPE_CHECKING:
@@ -21,10 +22,13 @@ class Signature(Base):
     """Modality-specific fingerprints for identity and similarity.
 
     Different mediums produce different signatures:
-    - Image: SHA256, pHash/dHash, vision embedding (CLIP), EXIF summary
-    - Video: SHA256, keyframe pHash, pooled video embedding, duration
-    - Text: SHA256 (normalized), simhash, text embedding
-    - JSON: schema hash, content hash (canonicalized), text embedding
+    - Image: SHA256, pHash/dHash, image_embedding (CLIP), EXIF summary
+    - Video: SHA256, keyframe pHash, image_embedding (pooled frames), duration
+    - Text: SHA256 (normalized), simhash, text_embedding (BGE)
+    - JSON: schema hash, content hash (canonicalized), text_embedding
+
+    Embeddings are stored in separate columns by modality due to different dimensions.
+    Dimensions configured in settings: dim_text_embedding, dim_image_embedding.
     """
 
     __tablename__ = "signatures"
@@ -33,7 +37,11 @@ class Signature(Base):
     object_id: Mapped[UUID] = mapped_column(ForeignKey("objects.object_id"), index=True)
     signature_type: Mapped[str] = mapped_column(String(64), index=True)
     hash_value: Mapped[str | None] = mapped_column(String(256), index=True)
-    embedding: Mapped[list[Any] | None] = mapped_column(Vector(1536))
+
+    # Separate embedding columns for different modalities (different dimensions)
+    text_embedding: Mapped[list[Any] | None] = mapped_column(Vector(settings.dim_text_embedding))
+    image_embedding: Mapped[list[Any] | None] = mapped_column(Vector(settings.dim_image_embedding))
+
     extra: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

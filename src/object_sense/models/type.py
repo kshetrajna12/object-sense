@@ -11,6 +11,7 @@ from sqlalchemy import DateTime, ForeignKey, Integer, String, func
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from object_sense.config import settings
 from object_sense.models.base import Base
 from object_sense.models.enums import TypeCreatedVia, TypeStatus
 
@@ -33,7 +34,7 @@ class Type(Base):
     canonical_name: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     aliases: Mapped[list[str]] = mapped_column(ARRAY(String), default=list)
     parent_type_id: Mapped[UUID | None] = mapped_column(ForeignKey("types.type_id"), index=True)
-    embedding: Mapped[list[Any] | None] = mapped_column(Vector(1536))
+    embedding: Mapped[list[Any] | None] = mapped_column(Vector(settings.dim_text_embedding))
     status: Mapped[TypeStatus] = mapped_column(default=TypeStatus.PROVISIONAL)
     merged_into_type_id: Mapped[UUID | None] = mapped_column(ForeignKey("types.type_id"))
     evidence_count: Mapped[int] = mapped_column(Integer, default=0)

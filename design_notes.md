@@ -1049,10 +1049,13 @@ Implemented SQLAlchemy models per concept_v1.md §3 and §9.
 
 **Decisions made:**
 
-1. **Vector dimensions: 1536**
-   - Used 1536-dimensional vectors for embeddings (OpenAI text-embedding-3-small default)
-   - Easily changeable via `Vector(dim)` parameter if we switch to different embedding models
-   - Affects: `Type.embedding`, `Signature.embedding`
+1. **Vector dimensions: Sparkstation models (configurable)**
+   - Using local Sparkstation LLM gateway models (not OpenAI)
+   - **bge-large**: 1024-dim text embeddings → `Type.embedding`, `Signature.text_embedding`
+   - **clip-vit**: 768-dim image embeddings → `Signature.image_embedding`
+   - Separate columns for different modalities (can't unify without projection/padding)
+   - Dimensions configured in `config.py`: `dim_text_embedding`, `dim_image_embedding`
+   - Models read from `settings` at class definition time — change once, applies everywhere
 
 2. **ObjectEntityLink as explicit association table**
    - concept_v1.md shows `entity_links: [FK → Entity]` on Object
