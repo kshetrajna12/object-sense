@@ -1092,6 +1092,18 @@ Implemented SQLAlchemy models per concept_v1.md §3 and §9.
 
 ## Open Questions for Next Discussion
 
+### Unified feature space for cross-medium clustering (object-sense-cqz)
+
+**Decided:** Store embeddings in separate columns by modality (text=1024, image=768).
+
+**Still open:** How to unify for cross-medium entity clustering?
+- Option A: Use CLIP for both text and image queries (768-dim shared space)
+- Option B: Project text embeddings to image space (or vice versa)
+- Option C: Late fusion — cluster within modality, then link entities across modalities
+- Option D: Learn a projection layer that maps both to common space
+
+CLIP already supports text→768 and image→768, so Option A may be simplest for v0.
+
 (Add new questions as they arise)
 
 ---
