@@ -159,6 +159,7 @@ See `design_notes.md` for full walkthrough and "Aardvark Paradox" resolution.
 
 ## Beads Workflow
 - Use beads (`bd`) for tracking multi-session work, dependencies, and discovered issues
+- **Always add descriptions** when creating issues — titles alone lose context across sessions
 - When closing an "OPEN:" beads issue, document the decision in `design_notes.md`
 - Beads tracks **work items**; docs track **knowledge and decisions**
 
