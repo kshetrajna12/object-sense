@@ -129,3 +129,4 @@ See `design_notes.md` for full walkthrough and "Aardvark Paradox" resolution.
 ## Files
 - `inital_idea.md` — Original high-level concept document
 - `design_notes.md` — Ongoing design discussion notes
+- `concept_v1.md` — **Complete concept document** (this is the canonical reference)

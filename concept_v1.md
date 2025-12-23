@@ -611,6 +611,12 @@ No UI needed. CLI + debug queries validate the ontology and clustering loop.
 | Unified feature space alignment | Open — how do visual/textual/structural features align technically? |
 | Query interface for consumers | Deferred |
 | v0 scope | Defined in §11 — verify feasibility after first spike |
+| **Latency: fast-path vs slow-path** | Open — LLM inference on every blob is expensive. Need fast-path (hash, deterministic IDs) vs slow-path (semantic clustering). |
+| **Ontology stability for consumers** | Open — if types merge mid-query, UX breaks. May need versioned snapshots or "stable views". |
+| **Evidence compaction** | Open — storing every belief forever doesn't scale. Need summarization once confidence stabilizes. |
+| **Proto-entity decay** | Open — proto-entities that never stabilize should be pruned, but rare-but-real entities shouldn't. Need decay on *confidence*, not existence. |
+| **Deterministic ID priority** | Noted — hard IDs (SKU, product_id, trip_id) should explicitly trump semantic similarity in entity resolution. |
+| **Feedback loops** | Open — how does the system learn from human corrections? Evidence is stored, but how does it improve future inferences? |
 
 ---
 
