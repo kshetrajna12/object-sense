@@ -1,0 +1,13 @@
+"""Tests for the FastAPI application."""
+
+from httpx import ASGITransport, AsyncClient
+
+from object_sense import __version__
+from object_sense.app import app
+
+
+async def test_health() -> None:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/health")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "version": __version__}
