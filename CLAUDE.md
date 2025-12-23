@@ -161,3 +161,7 @@ See `design_notes.md` for full walkthrough and "Aardvark Paradox" resolution.
 - Use beads (`bd`) for tracking multi-session work, dependencies, and discovered issues
 - When closing an "OPEN:" beads issue, document the decision in `design_notes.md`
 - Beads tracks **work items**; docs track **knowledge and decisions**
+
+## Skills
+- Proactively suggest new skills when repetitive patterns emerge or when a reusable capability would help
+- Skills live in `.claude/skills/`
