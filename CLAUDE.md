@@ -1,5 +1,17 @@
 # CLAUDE.md - Project Instructions
 
+## Session Start
+- Run `bd ready` to see available work
+- Run `bd list --status=in_progress` to see ongoing work
+- Check `git status` for any uncommitted changes from previous sessions
+
+## Session End
+- Create beads issues for any discovered/remaining work
+- Run tests if code changed
+- Close completed issues: `bd close <id>`
+- Sync and push: `bd sync && git push`
+- Verify: `git status` should show "up to date with origin"
+
 ## Commit Preferences
 - Do NOT include "Co-Authored-By: Claude" or "Generated with Claude Code" in commits
 
@@ -125,6 +137,20 @@ See `design_notes.md` for full walkthrough and "Aardvark Paradox" resolution.
 - Postgres (objects, types, evidence, signatures, type_proposals)
 - pgvector or Qdrant for embeddings
 - Local LLM + VLM for inference
+
+## Tooling & Code Style
+- **Dependency management**: UV (`uv add`, `uv sync`, `uv run`)
+- **Formatting**: ruff format
+- **Linting**: ruff check
+- **Type checking**: pyright or mypy
+- **Testing**: pytest
+- **Python version**: 3.12+
+
+### Conventions
+- snake_case for all Python code
+- Type hints on all public functions
+- Docstrings only where behavior isn't obvious from name/types
+- Prefer explicit over clever
 
 ## Files
 - `inital_idea.md` — Original high-level concept document
