@@ -1236,4 +1236,81 @@ Foundations are proven by being used by something real, not by being elegant in 
 
 ---
 
+## DECISION: LLM Integration Framework — pydantic-ai
+
+### Context
+
+ObjectSense needs LLM integration for:
+- **Step 4: Type Inference** — Propose primary_type, slots, maybe_new_type
+- **Step 5: Entity Resolution** — Help decide if observations refer to same entity
+- **Type Evolution** — Propose merges, splits, aliases
+- **Slot Extraction** — Extract structured values from unstructured content
+
+### Options Considered
+
+| Option | Pros | Cons |
+|--------|------|------|
+| **OpenAI SDK directly** | No extra deps, full control | Boilerplate for tool loops, manual retries, no validation |
+| **pydantic-ai** | Native Pydantic models, tool calling, automatic retries, async | New dependency |
+| **instructor** | Great for structured outputs | Less focused on tool calling agents |
+| **Custom wrapper** | Tailored to our needs | Maintenance burden |
+
+### Decision: pydantic-ai
+
+**Rationale:**
+
+1. **Native Pydantic integration** — Our schemas are already Pydantic models (Types, Entities, Evidence). pydantic-ai's structured output validation fits naturally.
+
+2. **Tool calling with functions** — Define tools as regular Python functions with type hints. Clean and testable.
+
+3. **Automatic retries with validation** — LLMs sometimes produce malformed JSON. pydantic-ai handles retry logic.
+
+4. **Multiple agents** — We'll have several agents (type inference, entity resolution, type evolution). pydantic-ai's Agent abstraction is reusable.
+
+5. **Dependency injection** — Easy to mock LLM responses for unit tests.
+
+6. **Async native** — Matches our async-first codebase (asyncpg, FastAPI).
+
+7. **Maintained by Pydantic team** — Same team as our core validation library.
+
+### Usage Pattern
+
+```python
+from pydantic_ai import Agent
+from pydantic import BaseModel
+
+class TypeProposal(BaseModel):
+    primary_type: str
+    slots: dict[str, str]
+    confidence: float
+    maybe_new_type: str | None
+
+type_inference_agent = Agent(
+    'openai:qwen3-vl-4b',  # via Sparkstation
+    result_type=TypeProposal,
+    system_prompt="You are a type inference engine..."
+)
+
+@type_inference_agent.tool
+async def search_types(ctx, query: str) -> list[dict]:
+    """Search existing types by semantic similarity."""
+    # Query type store...
+    return types
+
+result = await type_inference_agent.run(prompt, deps=deps)
+proposal = result.data  # TypeProposal, validated
+```
+
+### Configuration
+
+Using Sparkstation local gateway:
+- Base URL: `http://localhost:8000/v1`
+- Models: `qwen3-vl-4b` (vision+chat), `gpt-oss-20b` (reasoning)
+
+pydantic-ai supports OpenAI-compatible endpoints via model string configuration.
+
+**Status:** Decision made. Implementation in progress.
+
+---
+
 *Notes continue below as discussion progresses...*
