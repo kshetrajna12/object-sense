@@ -1,0 +1,154 @@
+"""JSON feature extraction.
+
+Handles:
+- CAN_PARSE_KEYS: Extract and analyze JSON structure
+- CAN_INFER_SCHEMA: Generate schema hash for identity
+- CAN_EMBED_TEXT: Embed JSON content as text
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from typing import Any
+
+from object_sense.clients.embeddings import EmbeddingClient
+from object_sense.extraction.base import ExtractionResult
+
+
+class JsonExtractor:
+    """Extract features from JSON content.
+
+    Features extracted:
+    - text_embedding: BGE embedding of JSON-as-text (1024-dim)
+    - hash_value: Schema hash (structure fingerprint)
+    - extracted_text: Flattened key-value pairs as text
+    - extra.schema: Inferred schema structure
+    - extra.key_count: Number of keys
+    - extra.is_array: Whether root is array
+    """
+
+    def __init__(self, embedding_client: EmbeddingClient | None = None) -> None:
+        self._client = embedding_client or EmbeddingClient()
+
+    async def extract(self, data: bytes, *, filename: str | None = None) -> ExtractionResult:
+        """Extract features from JSON bytes.
+
+        Args:
+            data: Raw JSON bytes
+            filename: Optional filename (unused)
+
+        Returns:
+            ExtractionResult with schema hash and text embedding
+        """
+        result = ExtractionResult(signature_type="json")
+
+        # Parse JSON
+        try:
+            text = data.decode("utf-8")
+            parsed = json.loads(text)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            # Invalid JSON - return empty result
+            return result
+
+        # Analyze structure
+        is_array = isinstance(parsed, list)
+        result.extra["is_array"] = is_array
+
+        # Infer schema and generate hash
+        schema = self._infer_schema(parsed)
+        result.extra["schema"] = schema
+        result.hash_value = self._hash_schema(schema)
+
+        # Count keys
+        if isinstance(parsed, dict):
+            result.extra["key_count"] = len(parsed)
+        elif isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
+            result.extra["key_count"] = len(parsed[0])
+
+        # Convert to text for embedding
+        text_repr = self._to_text(parsed)
+        if text_repr:
+            result.extracted_text = text_repr
+
+            # Embed as text
+            embeddings = await self._client.embed_text([text_repr])
+            if embeddings:
+                result.text_embedding = embeddings[0]
+
+        return result
+
+    def _infer_schema(self, obj: Any, max_depth: int = 5) -> dict[str, Any]:
+        """Infer a type schema from JSON object.
+
+        Returns a structure like:
+        {"type": "object", "properties": {"name": {"type": "string"}, ...}}
+        """
+        if max_depth <= 0:
+            return {"type": "any"}
+
+        if obj is None:
+            return {"type": "null"}
+        if isinstance(obj, bool):
+            return {"type": "boolean"}
+        if isinstance(obj, int):
+            return {"type": "integer"}
+        if isinstance(obj, float):
+            return {"type": "number"}
+        if isinstance(obj, str):
+            return {"type": "string"}
+        if isinstance(obj, list):
+            if not obj:
+                return {"type": "array", "items": {"type": "any"}}
+            # Infer from first item (simplified)
+            item_schema = self._infer_schema(obj[0], max_depth - 1)
+            return {"type": "array", "items": item_schema}
+        if isinstance(obj, dict):
+            properties = {}
+            for key, value in sorted(obj.items()):
+                properties[key] = self._infer_schema(value, max_depth - 1)
+            return {"type": "object", "properties": properties}
+
+        return {"type": "unknown"}
+
+    def _hash_schema(self, schema: dict[str, Any]) -> str:
+        """Generate a stable hash of the schema structure."""
+        # Canonical JSON representation
+        canonical = json.dumps(schema, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode()).hexdigest()[:16]
+
+    def _to_text(self, obj: Any, max_len: int = 8000) -> str:
+        """Convert JSON to text representation for embedding.
+
+        Flattens to key-value pairs for better semantic matching.
+        """
+        lines: list[str] = []
+        self._flatten(obj, "", lines)
+
+        text = "\n".join(lines)
+        if len(text) > max_len:
+            text = text[:max_len]
+
+        return text
+
+    def _flatten(self, obj: Any, prefix: str, lines: list[str], max_lines: int = 200) -> None:
+        """Recursively flatten JSON to key-value lines."""
+        if len(lines) >= max_lines:
+            return
+
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                new_prefix = f"{prefix}.{key}" if prefix else key
+                self._flatten(value, new_prefix, lines, max_lines)
+        elif isinstance(obj, list):
+            for i, item in enumerate(obj[:10]):  # Limit array items
+                new_prefix = f"{prefix}[{i}]"
+                self._flatten(item, new_prefix, lines, max_lines)
+            if len(obj) > 10:
+                lines.append(f"{prefix}: ... ({len(obj)} items)")
+        else:
+            # Leaf value
+            value_str = str(obj) if obj is not None else "null"
+            if len(value_str) > 200:
+                value_str = value_str[:200] + "..."
+            lines.append(f"{prefix}: {value_str}")
