@@ -116,8 +116,10 @@ def create_type_inference_agent() -> Agent[TypeInferenceDeps, TypeProposal]:
     querying the type store.
     """
     # Configure model with Sparkstation endpoint
+    # Use reasoning model (gpt-oss-20b) for larger context window (16k vs 4k)
+    # Type inference needs space for: system prompt + tools + schema + user message
     model = OpenAIChatModel(
-        settings.model_chat,
+        settings.model_reasoning,
         provider=OpenAIProvider(
             base_url=settings.llm_base_url,
             api_key=settings.llm_api_key,
