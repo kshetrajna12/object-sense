@@ -1092,19 +1092,59 @@ Implemented SQLAlchemy models per concept_v1.md §3 and §9.
 
 ## Open Questions for Next Discussion
 
-### Unified feature space for cross-medium clustering (object-sense-cqz)
-
-**Decided:** Store embeddings in separate columns by modality (text=1024, image=768).
-
-**Still open:** How to unify for cross-medium entity clustering?
-- Option A: Use CLIP for both text and image queries (768-dim shared space)
-- Option B: Project text embeddings to image space (or vice versa)
-- Option C: Late fusion — cluster within modality, then link entities across modalities
-- Option D: Learn a projection layer that maps both to common space
-
-CLIP already supports text→768 and image→768, so Option A may be simplest for v0.
-
 (Add new questions as they arise)
+
+---
+
+## Resolved Questions
+
+### Cross-medium entity resolution strategy (object-sense-cqz) — RESOLVED
+
+**Decision:** Late fusion with multiple embedding spaces.
+
+**Embedding columns in Signature table:**
+- `text_embedding` (1024-dim): BGE embedding for rich text semantics
+- `image_embedding` (768-dim): CLIP visual embedding for images
+- `clip_text_embedding` (768-dim): CLIP text embedding for cross-modal queries
+
+**Population by medium:**
+
+| Medium | text_embedding | image_embedding | clip_text_embedding | hash_value |
+|--------|----------------|-----------------|---------------------|------------|
+| Image  | caption→BGE    | CLIP(image)     | -                   | pHash      |
+| Text   | BGE(text)      | -               | CLIP(text)          | simhash    |
+| JSON   | fields→BGE     | -               | -                   | schema hash|
+| Video  | transcript→BGE | keyframe pool   | -                   | content hash|
+
+**Entity similarity algorithm:**
+```python
+def entity_similarity(obs1, obs2):
+    signals = []
+
+    # Hard signals (deterministic) — highest priority
+    if same_product_id(obs1, obs2):
+        signals.append(("product_id", 1.0))
+
+    # Same-modality similarity
+    if obs1.text_embedding and obs2.text_embedding:
+        signals.append(("text_sim", cosine(obs1.text_embedding, obs2.text_embedding)))
+    if obs1.image_embedding and obs2.image_embedding:
+        signals.append(("visual_sim", cosine(obs1.image_embedding, obs2.image_embedding)))
+
+    # Cross-modal similarity (CLIP text ↔ CLIP image)
+    if obs1.image_embedding and obs2.clip_text_embedding:
+        signals.append(("cross_modal", cosine(obs1.image_embedding, obs2.clip_text_embedding)))
+    if obs1.clip_text_embedding and obs2.image_embedding:
+        signals.append(("cross_modal", cosine(obs1.clip_text_embedding, obs2.image_embedding)))
+
+    return weighted_combine(signals)
+```
+
+**Rationale:**
+- Late fusion preserves modality-specific fidelity (BGE is better for text-to-text than CLIP)
+- CLIP natively supports text→768 for cross-modal matching (no projection needed)
+- Hard IDs (SKU, product_id) always trump embedding similarity
+- Separate columns allow independent ANN indexes per modality
 
 ---
 

@@ -24,11 +24,12 @@ class Settings(BaseSettings):
     model_chat: str = "qwen3-vl-4b"  # Vision + chat
     model_reasoning: str = "gpt-oss-20b"  # Reasoning with traces
     model_text_embedding: str = "bge-large"  # 1024-dim text embeddings
-    model_image_embedding: str = "clip-vit"  # 768-dim image embeddings
+    model_image_embedding: str = "clip-vit"  # 768-dim image/text embeddings
 
     # Embedding dimensions (must match models)
-    dim_text_embedding: int = 1024
-    dim_image_embedding: int = 768
+    dim_text_embedding: int = 1024  # bge-large for rich text semantics
+    dim_image_embedding: int = 768  # clip-vit for visual features
+    dim_clip_text_embedding: int = 768  # clip-vit for cross-modal text queries
 
 
 settings = Settings()
