@@ -1148,4 +1148,92 @@ def entity_similarity(obs1, obs2):
 
 ---
 
+## DECISION: Convergence with image_metadata_indexing
+
+### Context
+
+Two systems exist:
+- **ObjectSense** — Semantic substrate for identity, types, and entities
+- **image_metadata_indexing (IMI)** — Production wildlife photo search system (5.6k LOC, 175 tests)
+
+Question: Should these converge, and how?
+
+### The Contract: "Signals In, Substrate Out"
+
+**ObjectSense owns:**
+- Identity graph (blob → observation → entity)
+- Entity resolution and linking
+- Type system / schema evolution
+- Provenance and evidence tracking
+- Temporal proximity grouping (generic burst detection)
+- Quality primitives (sharpness, motion blur — properties of observation)
+
+**IMI owns:**
+- Burst workflow semantics (representative selection, culling UX)
+- Domain-specific quality judgments (eye focus, composition)
+- Ingest & storage ergonomics (RAW/HEIC quirks, folder conventions)
+- Search UX (filters, faceting, ranking)
+- All photographer-specific workflow
+
+**The seam:**
+- IMI produces observations and signals → ObjectSense
+- ObjectSense returns resolved entities and types → IMI
+
+### Strategy: Shadow-Mode Convergence
+
+**NOT migration. Parasitization.**
+
+IMI stays production-pure. ObjectSense runs in shadow mode on IMI's data.
+
+**Phase 1: Shadow Mode (now → 3 months)**
+- IMI unchanged, production
+- ObjectSense reads IMI's sqlite (read-only)
+- OS builds identity graph, proposes types, tracks provenance
+- IMI does NOT consume OS output yet
+- Goal: Stress-test OS on real messy data without user risk
+
+**Phase 2: First Consumption (3-6 months)**
+- IMI consumes ONE ObjectSense output:
+  - Blob dedup, OR
+  - Place entity resolution
+- Everything else remains IMI-owned
+- Minimal coupling (can still run without OS)
+
+**Phase 3: Earned Dependency (6+ months)**
+- Cross-session entity re-ID
+- Cross-modal unification
+- IMI becomes "wildlife app on ObjectSense"
+
+### Success Metric
+
+"If ObjectSense disappeared tomorrow, would IMI notice?"
+- Short term: No → good (shadow mode working)
+- Mid term: Slightly → ideal (first consumption proving value)
+- Long term: Yes → success (substrate earned its place)
+
+### Key Insight
+
+> "If ObjectSense can't survive IMI, it's not a substrate — it's a taxonomy engine."
+
+Foundations are proven by being used by something real, not by being elegant in isolation.
+
+### What Belongs Where (Examples)
+
+| Capability | ObjectSense | IMI |
+|------------|-------------|-----|
+| Blob dedup (SHA256) | ✅ | |
+| Temporal proximity grouping | ✅ | |
+| Sharpness/motion blur | ✅ (signal) | |
+| "Best shot in burst" | | ✅ |
+| Eye focus detection | | ✅ |
+| Species type proposals | ✅ | |
+| Burst culling UX | | ✅ |
+| Place entity resolution | ✅ | |
+| Search faceting | | ✅ |
+| Cross-trip re-ID | ✅ | |
+
+**Status:** Strategy decided. Tracked in beads as object-sense-g9f (epic) with dependency chain.
+
+---
+
 *Notes continue below as discussion progresses...*
