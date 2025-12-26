@@ -133,6 +133,7 @@ def create_type_inference_agent() -> Agent[TypeInferenceDeps, TypeProposal]:
         # gpt-oss-20b doesn't reliably follow tool_choice, but response_format works.
         output_type=NativeOutput(TypeProposal),
         system_prompt=TYPE_INFERENCE_SYSTEM_PROMPT,
+        # Note: tool calls are flaky with gpt-oss-20b - see object-sense-9vs
         retries=2,
     )
 
