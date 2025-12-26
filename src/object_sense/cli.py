@@ -300,30 +300,57 @@ def ingest(
 
 @app.command("show-object")
 def show_object(
-    object_id: Annotated[str, typer.Argument(help="Object ID (UUID)")],
+    object_id: Annotated[str, typer.Argument(help="Object ID (full UUID or prefix)")],
 ):
     """Show details for a specific object."""
     async def _show():
         await init_db()
-        try:
-            oid = UUID(object_id)
-        except ValueError:
-            console.print(f"[red]Error:[/red] Invalid UUID: {object_id}")
-            raise typer.Exit(1) from None
-
         async with async_session_factory() as session:
-            stmt = (
-                select(Object)
-                .options(
-                    selectinload(Object.primary_type),
-                    selectinload(Object.blob),
-                    selectinload(Object.entity_links),
-                    selectinload(Object.signatures),
+            # Try exact UUID first, then prefix match
+            obj = None
+            try:
+                oid = UUID(object_id)
+                stmt = (
+                    select(Object)
+                    .options(
+                        selectinload(Object.primary_type),
+                        selectinload(Object.blob),
+                        selectinload(Object.entity_links),
+                        selectinload(Object.signatures),
+                    )
+                    .where(Object.object_id == oid)
                 )
-                .where(Object.object_id == oid)
-            )
-            result = await session.execute(stmt)
-            obj = result.scalar_one_or_none()
+                result = await session.execute(stmt)
+                obj = result.scalar_one_or_none()
+            except ValueError:
+                # Not a valid UUID, try prefix match
+                pass
+
+            if not obj:
+                # Prefix match on UUID as text
+                from sqlalchemy import cast, String
+                stmt = (
+                    select(Object)
+                    .options(
+                        selectinload(Object.primary_type),
+                        selectinload(Object.blob),
+                        selectinload(Object.entity_links),
+                        selectinload(Object.signatures),
+                    )
+                    .where(cast(Object.object_id, String).startswith(object_id))
+                )
+                result = await session.execute(stmt)
+                matches = result.scalars().all()
+
+                if len(matches) == 0:
+                    console.print(f"[red]Error:[/red] No object found matching: {object_id}")
+                    raise typer.Exit(1)
+                elif len(matches) > 1:
+                    console.print(f"[red]Error:[/red] Ambiguous prefix '{object_id}' matches {len(matches)} objects:")
+                    for m in matches[:5]:
+                        console.print(f"  • {m.object_id}")
+                    raise typer.Exit(1)
+                obj = matches[0]
 
             if not obj:
                 console.print(f"[red]Error:[/red] Object not found: {object_id}")
@@ -358,10 +385,14 @@ def show_object(
                 table.add_column("Type")
                 table.add_column("Value")
                 for sig in obj.signatures:
-                    if sig.value:
-                        val = sig.value
-                    elif sig.embedding:
-                        val = f"embedding ({len(sig.embedding)}d)"
+                    if sig.hash_value:
+                        val = sig.hash_value
+                    elif sig.text_embedding is not None:
+                        val = f"text embedding ({len(sig.text_embedding)}d)"
+                    elif sig.image_embedding is not None:
+                        val = f"image embedding ({len(sig.image_embedding)}d)"
+                    elif sig.clip_text_embedding is not None:
+                        val = f"CLIP text embedding ({len(sig.clip_text_embedding)}d)"
                     else:
                         val = "-"
                     val_str = str(val)
@@ -543,6 +574,7 @@ def review_types(
 def search(
     query: Annotated[str, typer.Argument(help="Search query")],
     limit: Annotated[int, typer.Option(help="Maximum results")] = 10,
+    full_ids: Annotated[bool, typer.Option("--full-ids", "-f", help="Show full UUIDs")] = False,
 ):
     """Search objects by query.
 
@@ -568,7 +600,7 @@ def search(
                 return
 
             table = Table(title=f"Search Results: '{query}'")
-            table.add_column("ID")
+            table.add_column("ID", no_wrap=full_ids)
             table.add_column("Type")
             table.add_column("Medium")
             table.add_column("Source")
@@ -576,8 +608,9 @@ def search(
             for obj in objects:
                 source = obj.source_id.split("/")[-1] if "/" in obj.source_id else obj.source_id
                 type_name = obj.primary_type.canonical_name if obj.primary_type else "-"
+                obj_id = str(obj.object_id) if full_ids else str(obj.object_id)[:8] + "..."
                 table.add_row(
-                    str(obj.object_id)[:8] + "...",
+                    obj_id,
                     type_name,
                     obj.medium.value,
                     source[:50] + "..." if len(source) > 50 else source,
