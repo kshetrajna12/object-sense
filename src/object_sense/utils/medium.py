@@ -56,6 +56,28 @@ _EXTENSION_MAP: Final[dict[str, Medium]] = {
     ".heif": Medium.IMAGE,
     ".svg": Medium.IMAGE,
     ".ico": Medium.IMAGE,
+    # RAW image formats (camera-specific)
+    ".raw": Medium.IMAGE,
+    ".arw": Medium.IMAGE,  # Sony
+    ".cr2": Medium.IMAGE,  # Canon (older)
+    ".cr3": Medium.IMAGE,  # Canon (newer)
+    ".nef": Medium.IMAGE,  # Nikon
+    ".nrw": Medium.IMAGE,  # Nikon (compact)
+    ".orf": Medium.IMAGE,  # Olympus
+    ".rw2": Medium.IMAGE,  # Panasonic
+    ".pef": Medium.IMAGE,  # Pentax
+    ".srw": Medium.IMAGE,  # Samsung
+    ".x3f": Medium.IMAGE,  # Sigma
+    ".raf": Medium.IMAGE,  # Fuji
+    ".dng": Medium.IMAGE,  # Adobe DNG (universal RAW)
+    ".dcr": Medium.IMAGE,  # Kodak
+    ".kdc": Medium.IMAGE,  # Kodak
+    ".mrw": Medium.IMAGE,  # Minolta
+    ".3fr": Medium.IMAGE,  # Hasselblad
+    ".mef": Medium.IMAGE,  # Mamiya
+    ".mos": Medium.IMAGE,  # Leaf
+    ".erf": Medium.IMAGE,  # Epson
+    ".rwl": Medium.IMAGE,  # Leica
     # Video
     ".mp4": Medium.VIDEO,
     ".mov": Medium.VIDEO,
@@ -272,9 +294,14 @@ def _check_ftyp(data: bytes) -> Medium | None:
 
     brand = data[brand_offset : brand_offset + 4]
 
-    # HEIC/HEIF brands
-    heic_brands = {b"heic", b"heix", b"hevc", b"hevx", b"mif1", b"msf1"}
-    if brand in heic_brands:
+    # Image brands (HEIC/HEIF, Canon CR3, etc.)
+    image_brands = {
+        # HEIC/HEIF
+        b"heic", b"heix", b"hevc", b"hevx", b"mif1", b"msf1",
+        # Canon CR3 RAW
+        b"crx ", b"cr3 ",
+    }
+    if brand in image_brands:
         return Medium.IMAGE
 
     # Video brands (MP4, MOV, etc.)

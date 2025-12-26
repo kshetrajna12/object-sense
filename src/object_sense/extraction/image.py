@@ -4,15 +4,34 @@ Handles:
 - CAN_EMBED_IMAGE: CLIP visual embeddings
 - CAN_EXTRACT_EXIF: EXIF metadata extraction
 - CAN_CAPTION: Image captioning (via VLM) - deferred to LLM integration phase
+
+Supports standard image formats (JPEG, PNG, WebP, etc.) and RAW formats
+(CR2, CR3, NEF, ARW, DNG, etc.) via rawpy.
 """
 
 from __future__ import annotations
 
 import io
+from pathlib import Path
 from typing import Any
 
 from object_sense.clients.embeddings import EmbeddingClient
 from object_sense.extraction.base import ExtractionResult
+
+# RAW file extensions that need rawpy processing
+RAW_EXTENSIONS = frozenset({
+    ".raw", ".arw", ".cr2", ".cr3", ".nef", ".nrw",
+    ".orf", ".rw2", ".pef", ".srw", ".x3f", ".raf",
+    ".dng", ".dcr", ".kdc", ".mrw", ".3fr", ".mef",
+    ".mos", ".erf", ".rwl",
+})
+
+
+def _is_raw_file(filename: str | None) -> bool:
+    """Check if filename indicates a RAW image format."""
+    if not filename:
+        return False
+    return Path(filename).suffix.lower() in RAW_EXTENSIONS
 
 
 class ImageExtractor:
@@ -35,28 +54,120 @@ class ImageExtractor:
         """Extract features from image bytes.
 
         Args:
-            data: Raw image bytes (JPEG, PNG, WebP, etc.)
-            filename: Optional filename (unused for images)
+            data: Raw image bytes (JPEG, PNG, WebP, RAW formats, etc.)
+            filename: Optional filename (used to detect RAW formats)
 
         Returns:
             ExtractionResult with image_embedding and EXIF metadata
         """
         result = ExtractionResult(signature_type="image")
 
-        # Extract CLIP visual embedding
-        embeddings = await self._client.embed_image([data])
-        if embeddings:
-            result.image_embedding = embeddings[0]
+        # Check if this is a RAW file that needs special handling
+        is_raw = _is_raw_file(filename)
 
-        # Extract EXIF and dimensions
-        exif_data, dimensions = self._extract_metadata(data)
-        if exif_data:
-            result.extra["exif"] = exif_data
-        if dimensions:
-            result.extra["width"] = dimensions[0]
-            result.extra["height"] = dimensions[1]
+        if is_raw:
+            # Process RAW file - extract embedded JPEG thumbnail for embedding
+            jpeg_data, dimensions, raw_info = self._extract_raw_thumbnail(data)
+            if jpeg_data:
+                # Use extracted JPEG for embedding
+                embeddings = await self._client.embed_image([jpeg_data])
+                if embeddings:
+                    result.image_embedding = embeddings[0]
+            if dimensions:
+                result.extra["width"] = dimensions[0]
+                result.extra["height"] = dimensions[1]
+            if raw_info:
+                result.extra.update(raw_info)
+            result.extra["is_raw"] = True
+        else:
+            # Standard image processing
+            embeddings = await self._client.embed_image([data])
+            if embeddings:
+                result.image_embedding = embeddings[0]
+
+            # Extract EXIF and dimensions
+            exif_data, dimensions = self._extract_metadata(data)
+            if exif_data:
+                result.extra["exif"] = exif_data
+            if dimensions:
+                result.extra["width"] = dimensions[0]
+                result.extra["height"] = dimensions[1]
 
         return result
+
+    def _extract_raw_thumbnail(
+        self, data: bytes
+    ) -> tuple[bytes | None, tuple[int, int] | None, dict[str, Any] | None]:
+        """Extract JPEG thumbnail from RAW file for embedding.
+
+        RAW files contain an embedded JPEG preview that's fast to extract
+        and suitable for generating visual embeddings.
+
+        Returns:
+            Tuple of (jpeg_bytes, (width, height), raw_info) - any can be None
+        """
+        try:
+            import rawpy
+        except ImportError:
+            # rawpy not available - can't process RAW
+            return None, None, {"error": "rawpy not installed"}
+
+        try:
+            # rawpy needs a file, so write to temp file
+            import tempfile
+
+            with tempfile.NamedTemporaryFile(suffix=".raw", delete=False) as tmp:
+                tmp.write(data)
+                tmp_path = tmp.name
+
+            try:
+                with rawpy.imread(tmp_path) as raw:
+                    raw_type = raw.raw_type
+                    raw_type_str = raw_type.name if hasattr(raw_type, "name") else str(raw_type)
+                    raw_info: dict[str, Any] = {
+                        "raw_type": raw_type_str,
+                        "num_colors": raw.num_colors,
+                    }
+
+                    # Get dimensions from raw sizes
+                    if hasattr(raw, "sizes"):
+                        raw_info["raw_width"] = raw.sizes.raw_width
+                        raw_info["raw_height"] = raw.sizes.raw_height
+                        dimensions = (raw.sizes.width, raw.sizes.height)
+                    else:
+                        dimensions = None
+
+                    # Try to extract embedded thumbnail (fastest)
+                    try:
+                        thumb = raw.extract_thumb()
+                        if thumb.format == rawpy.ThumbFormat.JPEG:
+                            return thumb.data, dimensions, raw_info
+                        # Bitmap thumbnail - convert to JPEG
+                        from PIL import Image
+
+                        img = Image.fromarray(thumb.data)
+                        buf = io.BytesIO()
+                        img.save(buf, format="JPEG", quality=85)
+                        return buf.getvalue(), dimensions, raw_info
+                    except rawpy.LibRawNoThumbnailError:
+                        pass  # No thumbnail, fall through to decode
+
+                    # No thumbnail - decode RAW at half size for speed
+                    rgb = raw.postprocess(use_camera_wb=True, half_size=True)
+                    from PIL import Image
+
+                    img = Image.fromarray(rgb)
+                    buf = io.BytesIO()
+                    img.save(buf, format="JPEG", quality=85)
+                    return buf.getvalue(), dimensions, raw_info
+
+            finally:
+                # Clean up temp file
+                import os
+                os.unlink(tmp_path)
+
+        except Exception as e:
+            return None, None, {"error": f"RAW processing failed: {e}"}
 
     def _extract_metadata(
         self, data: bytes
