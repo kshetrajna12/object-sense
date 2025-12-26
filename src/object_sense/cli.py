@@ -184,7 +184,7 @@ async def ingest_file(file_path: Path, verbose: bool = False) -> dict:
                 signature_id=uuid4(),
                 object_id=object_id,
                 signature_type="text_embedding",
-                embedding=extraction_result.text_embedding,
+                text_embedding=extraction_result.text_embedding,
             )
             session.add(sig)
 
@@ -193,7 +193,7 @@ async def ingest_file(file_path: Path, verbose: bool = False) -> dict:
                 signature_id=uuid4(),
                 object_id=object_id,
                 signature_type="image_embedding",
-                embedding=extraction_result.image_embedding,
+                image_embedding=extraction_result.image_embedding,
             )
             session.add(sig)
 
