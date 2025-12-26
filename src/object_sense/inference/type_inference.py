@@ -16,7 +16,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from pydantic_ai import Agent, RunContext
+from pydantic_ai import Agent, NativeOutput, RunContext
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
@@ -129,7 +129,9 @@ def create_type_inference_agent() -> Agent[TypeInferenceDeps, TypeProposal]:
     agent = Agent(
         model,
         deps_type=TypeInferenceDeps,
-        output_type=TypeProposal,
+        # Use NativeOutput to leverage response_format instead of tool calling.
+        # gpt-oss-20b doesn't reliably follow tool_choice, but response_format works.
+        output_type=NativeOutput(TypeProposal),
         system_prompt=TYPE_INFERENCE_SYSTEM_PROMPT,
         retries=2,
     )

@@ -8,7 +8,20 @@ See concept_v1.md §4 Step 4 for the full specification.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from typing import Annotated, Any
+
+from pydantic import BaseModel, BeforeValidator, Field
+
+
+def _coerce_to_string(v: Any) -> str:
+    """Coerce slot values to strings.
+
+    LLMs may return numeric values (49.99) instead of strings ("49.99").
+    This validator ensures all values become strings for consistent handling.
+    """
+    if v is None:
+        return ""
+    return str(v)
 
 
 class SlotValue(BaseModel):
@@ -21,7 +34,7 @@ class SlotValue(BaseModel):
     name: str = Field(
         description="Slot name in snake_case (e.g., 'lighting', 'species', 'location')"
     )
-    value: str = Field(
+    value: Annotated[str, BeforeValidator(_coerce_to_string)] = Field(
         description="Slot value as string. For entity references, use 'ref:entity_name'"
     )
     is_reference: bool = Field(
