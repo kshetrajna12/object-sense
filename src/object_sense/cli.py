@@ -157,13 +157,15 @@ async def ingest_file(file_path: Path, verbose: bool = False) -> dict:
 
         # Create object
         object_id = uuid4()
+        # Convert SlotValue list to dict for JSONB storage
+        slots_dict = {slot.name: slot.value for slot in type_proposal.slots}
         obj = Object(
             object_id=object_id,
             medium=medium,
             primary_type_id=primary_type.type_id,
             source_id=str(file_path.absolute()),
             blob_id=blob.blob_id,
-            slots=type_proposal.slots,
+            slots=slots_dict,
             status=ObjectStatus.ACTIVE,
         )
         session.add(obj)
