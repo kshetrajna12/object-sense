@@ -1,0 +1,181 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 900" width="1200" height="900">
+  <!-- Title -->
+  <text x="600" y="30" font-size="24" font-weight="bold" text-anchor="middle" fill="#212121">
+    ObjectSense Engine Architecture
+  </text>
+  <text x="600" y="55" font-size="14" text-anchor="middle" fill="#555" font-style="italic">
+    Semantic Substrate for Persistent Object Identity &amp; Type Awareness
+  </text>
+
+  <!-- Input Layer -->
+  <rect x="20" y="100" width="150" height="280" fill="#E8F4F8" stroke="#1976D2" stroke-width="2" rx="10"/>
+  <text x="95" y="120" font-size="12" font-weight="bold" text-anchor="middle">INPUT SOURCES</text>
+
+  <rect x="30" y="140" width="130" height="30" fill="white" stroke="#1976D2" stroke-width="1.5" rx="5"/>
+  <text x="95" y="160" font-size="11" text-anchor="middle">Images</text>
+
+  <rect x="30" y="180" width="130" height="30" fill="white" stroke="#1976D2" stroke-width="1.5" rx="5"/>
+  <text x="95" y="200" font-size="11" text-anchor="middle">Text</text>
+
+  <rect x="30" y="220" width="130" height="30" fill="white" stroke="#1976D2" stroke-width="1.5" rx="5"/>
+  <text x="95" y="240" font-size="11" text-anchor="middle">JSON</text>
+
+  <rect x="30" y="260" width="130" height="30" fill="white" stroke="#1976D2" stroke-width="1.5" rx="5"/>
+  <text x="95" y="280" font-size="11" text-anchor="middle">Video</text>
+
+  <rect x="30" y="300" width="130" height="30" fill="white" stroke="#1976D2" stroke-width="1.5" rx="5"/>
+  <text x="95" y="320" font-size="11" text-anchor="middle">Audio</text>
+
+  <line x1="170" y1="230" x2="220" y2="230" stroke="#1976D2" stroke-width="2" marker-end="url(#arrowblue)"/>
+
+  <!-- Processing Pipeline -->
+  <rect x="220" y="100" width="400" height="480" fill="#B3E5FC" stroke="#0277BD" stroke-width="2" rx="10"/>
+  <text x="420" y="120" font-size="12" font-weight="bold" text-anchor="middle">PROCESSING PIPELINE</text>
+
+  <!-- Step 1 -->
+  <rect x="240" y="140" width="360" height="45" fill="white" stroke="#0277BD" stroke-width="2" rx="8"/>
+  <text x="420" y="158" font-size="11" font-weight="bold" text-anchor="middle">1. INGEST</text>
+  <text x="420" y="175" font-size="9" text-anchor="middle" fill="#555">UUID, SHA256, Source ID</text>
+
+  <line x1="420" y1="185" x2="420" y2="200" stroke="#0277BD" stroke-width="2" marker-end="url(#arrowblue)"/>
+
+  <!-- Step 2 -->
+  <rect x="240" y="200" width="360" height="45" fill="white" stroke="#0277BD" stroke-width="2" rx="8"/>
+  <text x="420" y="218" font-size="11" font-weight="bold" text-anchor="middle">2. MEDIUM PROBE</text>
+  <text x="420" y="235" font-size="9" text-anchor="middle" fill="#555">File type detection</text>
+
+  <line x1="420" y1="245" x2="420" y2="260" stroke="#0277BD" stroke-width="2" marker-end="url(#arrowblue)"/>
+
+  <!-- Step 3 -->
+  <rect x="240" y="260" width="360" height="45" fill="white" stroke="#0277BD" stroke-width="2" rx="8"/>
+  <text x="420" y="278" font-size="11" font-weight="bold" text-anchor="middle">3. FEATURE EXTRACTION</text>
+  <text x="420" y="295" font-size="9" text-anchor="middle" fill="#555">Embeddings, Signatures, EXIF</text>
+
+  <line x1="420" y1="305" x2="420" y2="320" stroke="#0277BD" stroke-width="2" marker-end="url(#arrowblue)"/>
+
+  <!-- Step 4 -->
+  <rect x="240" y="320" width="360" height="45" fill="white" stroke="#0277BD" stroke-width="2" rx="8"/>
+  <text x="420" y="338" font-size="11" font-weight="bold" text-anchor="middle">4. TYPE INFERENCE (LLM)</text>
+  <text x="420" y="355" font-size="9" text-anchor="middle" fill="#555">pydantic-ai agent, type proposals</text>
+
+  <line x1="420" y1="365" x2="420" y2="380" stroke="#0277BD" stroke-width="2" marker-end="url(#arrowblue)"/>
+
+  <!-- Step 5 -->
+  <rect x="240" y="380" width="360" height="45" fill="white" stroke="#0277BD" stroke-width="2" rx="8"/>
+  <text x="420" y="398" font-size="11" font-weight="bold" text-anchor="middle">5. ENTITY RESOLUTION</text>
+  <text x="420" y="415" font-size="9" text-anchor="middle" fill="#555">Soft clustering, linking</text>
+
+  <line x1="420" y1="425" x2="420" y2="440" stroke="#0277BD" stroke-width="2" marker-end="url(#arrowblue)"/>
+
+  <!-- Step 6 -->
+  <rect x="240" y="440" width="360" height="45" fill="white" stroke="#0277BD" stroke-width="2" rx="8"/>
+  <text x="420" y="458" font-size="11" font-weight="bold" text-anchor="middle">6. STORE &amp; INDEX</text>
+  <text x="420" y="475" font-size="9" text-anchor="middle" fill="#555">Persist to database</text>
+
+  <line x1="420" y1="495" x2="420" y2="540" stroke="#388E3C" stroke-width="2" marker-end="url(#arrowgreen)"/>
+
+  <!-- LLM Services -->
+  <rect x="650" y="250" width="320" height="260" fill="#FFB74D" stroke="#F57C00" stroke-width="2" rx="10"/>
+  <text x="810" y="270" font-size="12" font-weight="bold" text-anchor="middle">LLM SERVICES</text>
+  <text x="810" y="288" font-size="9" text-anchor="middle" fill="#555">Sparkstation Gateway</text>
+  <text x="810" y="302" font-size="8" text-anchor="middle" fill="#555">http://localhost:8000/v1</text>
+
+  <text x="670" y="330" font-size="10" font-weight="bold">• qwen3-vl-4b</text>
+  <text x="685" y="345" font-size="8" fill="#555">Vision + Chat</text>
+
+  <text x="670" y="370" font-size="10" font-weight="bold">• gpt-oss-20b</text>
+  <text x="685" y="385" font-size="8" fill="#555">Reasoning (16k context)</text>
+
+  <text x="670" y="410" font-size="10" font-weight="bold">• bge-large</text>
+  <text x="685" y="425" font-size="8" fill="#555">Text Embeddings (1024d)</text>
+
+  <text x="670" y="450" font-size="10" font-weight="bold">• clip-vit</text>
+  <text x="685" y="465" font-size="8" fill="#555">Image Embeddings (768d)</text>
+
+  <!-- Arrows from LLM to pipeline -->
+  <line x1="650" y1="350" x2="600" y2="342" stroke="#F57C00" stroke-width="2" stroke-dasharray="5,5" marker-start="url(#arroworange)" marker-end="url(#arroworange)"/>
+  <line x1="650" y1="280" x2="600" y2="280" stroke="#F57C00" stroke-width="2" stroke-dasharray="5,5" marker-start="url(#arroworange)" marker-end="url(#arroworange)"/>
+
+  <!-- Storage Layer -->
+  <rect x="150" y="540" width="720" height="150" fill="#81C784" stroke="#388E3C" stroke-width="2" rx="10"/>
+  <text x="510" y="560" font-size="12" font-weight="bold" text-anchor="middle">STORAGE LAYER</text>
+
+  <!-- PostgreSQL 1 -->
+  <rect x="180" y="580" width="140" height="90" fill="white" stroke="#388E3C" stroke-width="2" rx="8"/>
+  <text x="250" y="600" font-size="10" font-weight="bold" text-anchor="middle">PostgreSQL</text>
+  <text x="250" y="620" font-size="9" text-anchor="middle">Objects</text>
+  <text x="250" y="635" font-size="9" text-anchor="middle">Types</text>
+  <text x="250" y="650" font-size="9" text-anchor="middle">Entities</text>
+
+  <!-- PostgreSQL 2 -->
+  <rect x="340" y="580" width="140" height="90" fill="white" stroke="#388E3C" stroke-width="2" rx="8"/>
+  <text x="410" y="600" font-size="10" font-weight="bold" text-anchor="middle">PostgreSQL</text>
+  <text x="410" y="620" font-size="9" text-anchor="middle">Evidence</text>
+  <text x="410" y="635" font-size="9" text-anchor="middle">Signatures</text>
+  <text x="410" y="650" font-size="9" text-anchor="middle">TypeEvolution</text>
+
+  <!-- pgvector -->
+  <rect x="500" y="580" width="140" height="90" fill="white" stroke="#388E3C" stroke-width="2" rx="8"/>
+  <text x="570" y="600" font-size="10" font-weight="bold" text-anchor="middle">pgvector</text>
+  <text x="570" y="620" font-size="9" text-anchor="middle">Embedding</text>
+  <text x="570" y="635" font-size="9" text-anchor="middle">Index</text>
+
+  <!-- Blob Store -->
+  <rect x="660" y="580" width="140" height="90" fill="white" stroke="#388E3C" stroke-width="2" rx="8"/>
+  <text x="730" y="600" font-size="10" font-weight="bold" text-anchor="middle">Blob Store</text>
+  <text x="730" y="620" font-size="9" text-anchor="middle">Raw Content</text>
+  <text x="730" y="635" font-size="9" text-anchor="middle">(SHA256)</text>
+
+  <!-- Data Model -->
+  <rect x="1000" y="100" width="180" height="140" fill="#CE93D8" stroke="#7B1FA2" stroke-width="2" rx="10"/>
+  <text x="1090" y="120" font-size="12" font-weight="bold" text-anchor="middle">DATA MODEL</text>
+  <text x="1020" y="145" font-size="9" font-family="monospace">Blob → Object → Type</text>
+  <text x="1020" y="162" font-size="9" font-family="monospace">  ↓      ↓         ↓</text>
+  <text x="1020" y="179" font-size="9" font-family="monospace">Entity ←→ Object</text>
+  <text x="1020" y="196" font-size="9" font-family="monospace">  ↓</text>
+  <text x="1020" y="213" font-size="9" font-family="monospace">Evidence (all)</text>
+
+  <!-- Key Principles -->
+  <rect x="1000" y="260" width="180" height="190" fill="#FFEBEE" stroke="#C62828" stroke-width="2" rx="10"/>
+  <text x="1090" y="280" font-size="12" font-weight="bold" text-anchor="middle">KEY PRINCIPLES</text>
+
+  <text x="1015" y="305" font-size="9" font-weight="bold">• Medium ≠ Type</text>
+  <text x="1025" y="320" font-size="8" fill="#555">representation vs meaning</text>
+
+  <text x="1015" y="345" font-size="9" font-weight="bold">• Types Emerge</text>
+  <text x="1025" y="360" font-size="8" fill="#555">LLM priors + recurrence</text>
+
+  <text x="1015" y="385" font-size="9" font-weight="bold">• Entities = Clusters</text>
+  <text x="1025" y="400" font-size="8" fill="#555">observations → entities</text>
+
+  <text x="1015" y="425" font-size="9" font-weight="bold">• Engine Decides</text>
+  <text x="1025" y="440" font-size="8" fill="#555">LLM proposes only</text>
+
+  <!-- Emergence Order -->
+  <rect x="1000" y="470" width="180" height="120" fill="#FFF3E0" stroke="#E65100" stroke-width="2" rx="10"/>
+  <text x="1090" y="490" font-size="11" font-weight="bold" text-anchor="middle">EMERGENCE ORDER</text>
+  <text x="1090" y="515" font-size="9" font-family="monospace" text-anchor="middle" font-weight="bold" fill="#C62828">Observation</text>
+  <text x="1090" y="530" font-size="9" font-family="monospace" text-anchor="middle">↓</text>
+  <text x="1090" y="545" font-size="9" font-family="monospace" text-anchor="middle" font-weight="bold" fill="#C62828">Entity</text>
+  <text x="1090" y="560" font-size="9" font-family="monospace" text-anchor="middle">↓</text>
+  <text x="1090" y="575" font-size="9" font-family="monospace" text-anchor="middle" font-weight="bold" fill="#C62828">Type → Domain</text>
+
+  <!-- Footer -->
+  <text x="600" y="880" font-size="11" text-anchor="middle" font-style="italic" fill="#666">
+    A self-organizing world model that knows what things are, not just what they look like
+  </text>
+
+  <!-- Arrow markers -->
+  <defs>
+    <marker id="arrowblue" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#1976D2" />
+    </marker>
+    <marker id="arrowgreen" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#388E3C" />
+    </marker>
+    <marker id="arroworange" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#F57C00" />
+    </marker>
+  </defs>
+</svg>
