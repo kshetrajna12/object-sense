@@ -31,5 +31,35 @@ class Settings(BaseSettings):
     dim_image_embedding: int = 768  # clip-vit for visual features
     dim_clip_text_embedding: int = 768  # clip-vit for cross-modal text queries
 
+    # ── Type Promotion Thresholds (design_v2_corrections.md §7) ──────────────
+    # Promotion happens when ANY of these conditions are met:
+
+    # Evidence threshold: promote when evidence_count >= this value
+    # "5 entities OR 20 observations" - we use 5 as default
+    type_promotion_min_evidence: int = 5
+
+    # Coherence threshold: promote when cluster tightness > this value
+    type_promotion_min_coherence: float = 0.75
+
+    # Time window: candidate must survive this many days without merge/contradiction
+    type_promotion_survival_days: int = 7
+
+    # ── TypeCandidate Cleanup Thresholds ─────────────────────────────────────
+    # Reject candidates with evidence_count == 1 after this many days
+    type_candidate_reject_after_days: int = 30
+
+    # GC (garbage collect) rejected candidates after this many days
+    type_candidate_gc_after_days: int = 365
+
+    # ── Entity Resolution Thresholds (design_v2_corrections.md §5) ───────────
+    # T_link: High confidence, link to existing entity
+    entity_resolution_t_link: float = 0.85
+
+    # T_new: Below this, create new proto-entity
+    entity_resolution_t_new: float = 0.60
+
+    # T_margin: If best_score - second_best < this, flag for review
+    entity_resolution_t_margin: float = 0.10
+
 
 settings = Settings()

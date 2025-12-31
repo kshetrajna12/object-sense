@@ -8,12 +8,15 @@ import pytest
 
 from object_sense.extraction.base import ExtractionResult
 from object_sense.inference.schemas import (
+    DeterministicId,
     EntityHypothesis,
     SimilarObservation,
     SlotValue,
+    TypeCandidateProposal,
     TypeProposal,
     TypeSearchResult,
 )
+from object_sense.models.enums import EntityNature
 from object_sense.inference.type_inference import (
     TypeInferenceAgent,
     TypeInferenceDeps,
@@ -60,20 +63,30 @@ class TestEntityHypothesis:
     """Tests for EntityHypothesis schema."""
 
     def test_minimal(self) -> None:
-        entity = EntityHypothesis(entity_type="animal_entity")
+        # entity_nature is now required
+        entity = EntityHypothesis(
+            entity_type="animal_entity",
+            entity_nature=EntityNature.INDIVIDUAL,
+        )
         assert entity.entity_type == "animal_entity"
+        assert entity.entity_nature == EntityNature.INDIVIDUAL
         assert entity.suggested_name is None
         assert entity.slots == []
+        assert entity.deterministic_ids == []
         assert entity.confidence == 0.7
         assert entity.reasoning is None
 
     def test_full(self) -> None:
         entity = EntityHypothesis(
             entity_type="animal_entity",
+            entity_nature=EntityNature.INDIVIDUAL,
             suggested_name="Marula Leopard",
             slots=[
                 SlotValue(name="species", value="leopard"),
                 SlotValue(name="pose", value="stalking"),
+            ],
+            deterministic_ids=[
+                DeterministicId(id_type="gps", id_value="-25.0,28.0", id_namespace="wgs84"),
             ],
             confidence=0.85,
             reasoning="Detected large cat with spotted coat",
@@ -81,54 +94,133 @@ class TestEntityHypothesis:
         assert entity.suggested_name == "Marula Leopard"
         assert len(entity.slots) == 2
         assert entity.slots[0].name == "species"
+        assert len(entity.deterministic_ids) == 1
+        assert entity.deterministic_ids[0].id_type == "gps"
+
+    def test_entity_nature_values(self) -> None:
+        # Test all entity_nature values
+        for nature in EntityNature:
+            entity = EntityHypothesis(
+                entity_type="test_entity",
+                entity_nature=nature,
+            )
+            assert entity.entity_nature == nature
 
 
 class TestTypeProposal:
-    """Tests for TypeProposal schema."""
+    """Tests for TypeProposal schema with Step 4A/4B split."""
 
-    def test_minimal(self) -> None:
+    def test_minimal_with_existing_type(self) -> None:
         proposal = TypeProposal(
-            primary_type="wildlife_photo",
+            observation_kind="wildlife_photo",
+            existing_type_name="wildlife_photo",
             reasoning="Image contains wildlife subject",
         )
-        assert proposal.primary_type == "wildlife_photo"
-        assert proposal.primary_type_confidence == 0.8
-        assert proposal.is_existing_type is True
-        assert proposal.slots == []
-        assert proposal.entity_hypotheses == []
-        assert proposal.maybe_new_type is None
+        assert proposal.observation_kind == "wildlife_photo"
+        assert proposal.existing_type_name == "wildlife_photo"
+        assert proposal.type_candidate is None
+        assert proposal.facets == {}
+        assert proposal.entity_seeds == []
+        assert proposal.deterministic_ids == []
 
     def test_full_proposal(self) -> None:
         proposal = TypeProposal(
-            primary_type="wildlife_photo",
-            primary_type_confidence=0.95,
-            is_existing_type=True,
-            slots=[
-                SlotValue(name="lighting", value="backlit"),
-            ],
-            entity_hypotheses=[
+            observation_kind="wildlife_photo",
+            facets={"lighting": "backlit", "detected_objects": ["leopard"]},
+            entity_seeds=[
                 EntityHypothesis(
                     entity_type="animal_entity",
+                    entity_nature=EntityNature.INDIVIDUAL,
                     suggested_name="Unknown Leopard",
                 ),
             ],
-            maybe_new_type="backlit_wildlife_photo",
-            new_type_rationale="Distinct lighting style worth tracking",
+            deterministic_ids=[
+                DeterministicId(id_type="gps", id_value="-25.0,28.0", id_namespace="wgs84"),
+            ],
+            type_candidate=TypeCandidateProposal(
+                proposed_name="backlit_wildlife_photo",
+                rationale="Distinct lighting style worth tracking",
+            ),
             reasoning="Wildlife photo with dramatic backlighting",
         )
 
-        assert proposal.primary_type_confidence == 0.95
-        assert len(proposal.slots) == 1
-        assert len(proposal.entity_hypotheses) == 1
-        assert proposal.maybe_new_type == "backlit_wildlife_photo"
+        assert proposal.observation_kind == "wildlife_photo"
+        assert "lighting" in proposal.facets
+        assert len(proposal.entity_seeds) == 1
+        assert proposal.entity_seeds[0].entity_nature == EntityNature.INDIVIDUAL
+        assert len(proposal.deterministic_ids) == 1
+        assert proposal.type_candidate is not None
+        assert proposal.type_candidate.proposed_name == "backlit_wildlife_photo"
 
     def test_new_type_proposal(self) -> None:
         proposal = TypeProposal(
-            primary_type="safari_photo",
-            is_existing_type=False,
+            observation_kind="wildlife_photo",
+            type_candidate=TypeCandidateProposal(
+                proposed_name="safari_photo",
+                rationale="New type for safari context photos",
+                suggested_parent="wildlife_photo",
+            ),
             reasoning="New type for safari context photos",
         )
-        assert proposal.is_existing_type is False
+        assert proposal.type_candidate is not None
+        assert proposal.type_candidate.proposed_name == "safari_photo"
+        assert proposal.type_candidate.suggested_parent == "wildlife_photo"
+        assert proposal.existing_type_name is None
+
+
+class TestTypeCandidateProposal:
+    """Tests for TypeCandidateProposal schema."""
+
+    def test_minimal(self) -> None:
+        proposal = TypeCandidateProposal(
+            proposed_name="new_type",
+            rationale="Needed for X",
+        )
+        assert proposal.proposed_name == "new_type"
+        assert proposal.rationale == "Needed for X"
+        assert proposal.suggested_parent is None
+        assert proposal.confidence == 0.7
+
+    def test_with_parent(self) -> None:
+        proposal = TypeCandidateProposal(
+            proposed_name="safari_leopard_photo",
+            rationale="Specific subtype for safari leopard photos",
+            suggested_parent="wildlife_photo",
+            confidence=0.9,
+        )
+        assert proposal.suggested_parent == "wildlife_photo"
+        assert proposal.confidence == 0.9
+
+
+class TestDeterministicId:
+    """Tests for DeterministicId schema."""
+
+    def test_minimal(self) -> None:
+        det_id = DeterministicId(
+            id_type="sku",
+            id_value="PROD-12345",
+        )
+        assert det_id.id_type == "sku"
+        assert det_id.id_value == "PROD-12345"
+        assert det_id.id_namespace == "default"
+        assert det_id.strength == "strong"
+
+    def test_with_namespace(self) -> None:
+        det_id = DeterministicId(
+            id_type="sku",
+            id_value="12345",
+            id_namespace="acme_corp",
+            strength="strong",
+        )
+        assert det_id.id_namespace == "acme_corp"
+
+    def test_weak_id(self) -> None:
+        det_id = DeterministicId(
+            id_type="filename",
+            id_value="photo_001.jpg",
+            strength="weak",
+        )
+        assert det_id.strength == "weak"
 
 
 class TestTypeSearchResult:
@@ -283,9 +375,10 @@ class TestTypeInferenceAgent:
     @pytest.mark.asyncio
     async def test_infer_calls_agent(self) -> None:
         """Test that infer() calls the underlying pydantic-ai agent."""
-        # Create a mock result
+        # Create a mock result with new schema
         mock_proposal = TypeProposal(
-            primary_type="wildlife_photo",
+            observation_kind="wildlife_photo",
+            existing_type_name="wildlife_photo",
             reasoning="Test reasoning",
         )
 
@@ -306,15 +399,16 @@ class TestTypeInferenceAgent:
             # Verify run was called
             mock_run.assert_called_once()
 
-            # Verify result
-            assert result.primary_type == "wildlife_photo"
+            # Verify result (new schema)
+            assert result.observation_kind == "wildlife_photo"
             assert result.reasoning == "Test reasoning"
 
     @pytest.mark.asyncio
     async def test_infer_passes_deps(self) -> None:
         """Test that dependencies are passed correctly to the agent."""
         mock_proposal = TypeProposal(
-            primary_type="product_record",
+            observation_kind="product_record",
+            existing_type_name="product_record",
             reasoning="JSON product data",
         )
 
@@ -361,8 +455,15 @@ class TestTypeInferenceIntegration:
 
         result = await agent.infer(extraction, medium="image")
 
-        # Should propose a wildlife-related type
-        assert "photo" in result.primary_type.lower() or "wildlife" in result.primary_type.lower()
+        # Should have an observation_kind set (new schema)
+        assert result.observation_kind is not None
+        # Should be wildlife-related
+        type_name = (
+            result.type_candidate.proposed_name
+            if result.type_candidate
+            else result.existing_type_name or result.observation_kind
+        )
+        assert "photo" in type_name.lower() or "wildlife" in type_name.lower()
         assert result.reasoning is not None
         assert len(result.reasoning) > 0
 
@@ -379,5 +480,12 @@ class TestTypeInferenceIntegration:
 
         result = await agent.infer(extraction, medium="json")
 
-        # Should propose a product-related type
-        assert "product" in result.primary_type.lower() or "record" in result.primary_type.lower()
+        # Should have an observation_kind set (new schema)
+        assert result.observation_kind is not None
+        # Should be product-related
+        type_name = (
+            result.type_candidate.proposed_name
+            if result.type_candidate
+            else result.existing_type_name or result.observation_kind
+        )
+        assert "product" in type_name.lower() or "record" in type_name.lower()

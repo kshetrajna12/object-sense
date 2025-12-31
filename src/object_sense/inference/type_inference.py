@@ -2,12 +2,18 @@
 
 This module implements Step 4 of the processing loop: LLM Type Inference.
 
+Step 4 is split into two phases (design_v2_corrections.md §2):
+- Step 4A: Semantic Probe (routing hint, facets, entity seeds)
+- Step 4B: Type Proposal (TypeCandidate if new label proposed)
+
 The agent:
 1. Receives extracted features from an observation
 2. Queries the type store for similar/existing types (RAG)
-3. Proposes a TypeProposal with primary_type, slots, entity hypotheses
-
-See concept_v1.md §4 Step 4 and §8.2 for specification.
+3. Produces a TypeProposal with:
+   - observation_kind (low-cardinality routing hint)
+   - facets (extracted attributes)
+   - entity_seeds (with entity_nature)
+   - type_candidate OR existing_type_name
 """
 
 from __future__ import annotations
@@ -41,27 +47,62 @@ TYPE_INFERENCE_SYSTEM_PROMPT = """\
 You are a type inference engine for ObjectSense, a semantic substrate that provides \
 persistent object identity and type awareness.
 
-Your task: Given extracted features from an observation, propose what TYPE of thing it is.
+Your task: Analyze an observation and produce a TypeProposal with two parts:
+- Step 4A: Semantic probe (routing hint, facets, entity seeds)
+- Step 4B: Type proposal (new TypeCandidate or reference to existing type)
 
 ## Core Principles
 
 1. **Medium ≠ Type**: Medium (image, text, json) is how data is encoded. Type is what it IS.
-   - An image of a leopard → type: wildlife_photo (not "image")
-   - A JSON product record → type: product_record (not "json")
+   - An image of a leopard → observation_kind: wildlife_photo (not "image")
+   - A JSON product record → observation_kind: product_record (not "json")
 
-2. **Reuse existing types**: Before proposing a new type, search the type store.
+2. **observation_kind vs type_candidate**: These are DIFFERENT concepts!
+   - observation_kind: Low-cardinality routing hint (~20 values). Used for pipeline routing.
+     Examples: wildlife_photo, product_record, json_config, text_document, audio_clip
+   - type_candidate: High-cardinality semantic label. The actual type proposal.
+     Examples: african_leopard_sighting, nike_running_shoe, safari_hunt_event
+
+3. **Reuse existing types**: Before proposing a new type, search the type store.
    Query with semantic terms from the observation. Only create new types when nothing fits.
 
-3. **Types are semantic claims**: They represent meaning, not format.
+4. **Types are semantic claims**: They represent meaning, not format.
    - Good: wildlife_photo, product_record, hunt_event
    - Bad: image_file, json_data, text_document
 
-4. **Slots for variation**: Use slots for properties that vary within a type.
+5. **Slots for variation**: Use slots for properties that vary within a type.
    - lighting=backlit (slot) not backlit_photo (type)
    - species=leopard (slot referencing entity) not leopard_photo (type)
 
-5. **Entity hypotheses are seeds**: Detected entities (animals, locations, products) are \
-hypotheses for the entity resolution step. Include confidence and reasoning.
+## Entity Nature (CRITICAL)
+
+Every entity hypothesis MUST include entity_nature. This affects how Step 5 resolves it:
+
+- **individual**: A specific instance (The Marula Leopard, iPhone #ABC123, MalaMala Lodge)
+  → Resolution uses: visual re-ID, signatures, location clustering
+- **class**: A category or species (Leopard species, Blue color, Nike brand)
+  → Resolution uses: text semantics, name matching, facet agreement
+- **group**: A collection with members (Kambula Pride, Safari Trip 2024-06-12)
+  → Resolution uses: member overlap, temporal proximity
+- **event**: A time-bounded occurrence (Hunt on Jan 15, Purchase transaction)
+  → Resolution uses: timestamp, participants, location
+
+Examples:
+- Photo of a specific leopard → entity_nature: individual (we want to re-identify it)
+- Reference to "leopards" as a species → entity_nature: class (we want semantic match)
+- A lion pride mentioned → entity_nature: group (we track membership)
+- A hunt happening in the photo → entity_nature: event (we track time/participants)
+
+## Deterministic IDs (CRITICAL)
+
+If the observation contains DETERMINISTIC IDENTIFIERS, extract them:
+- SKU, product_id, ISBN, UPC (strong)
+- trip_id, booking_id, order_id (strong)
+- GPS coordinates (strong, id_type="gps", id_namespace="wgs84")
+- SHA256 hash (strong)
+- Filenames, URLs (weak - can change)
+
+These IDs DOMINATE identity resolution. They anchor entities with posterior=1.0.
 
 ## Naming Conventions
 
@@ -73,13 +114,14 @@ hypotheses for the entity resolution step. Include confidence and reasoning.
 ## Output Requirements
 
 Always provide:
-- primary_type: Your best guess at what type this observation is
-- is_existing_type: Whether this type already exists (check via search_types tool)
-- slots: Key properties extracted from the observation
-- entity_hypotheses: Any entities detected (animals, locations, products, etc.)
-- reasoning: Brief explanation of your inference
+1. **observation_kind**: Low-cardinality routing hint (one of ~20 values)
+2. **facets**: Extracted attributes as key-value pairs
+3. **entity_seeds**: Entity hypotheses WITH entity_nature for each
+4. **deterministic_ids**: Any hard identifiers found (observation-level)
+5. **type_candidate OR existing_type_name**: Either propose new or reference existing
+6. **reasoning**: Brief explanation of your inference
 
-Only set maybe_new_type if existing types truly don't capture the observation's essence.
+Use search_types to check if a type exists before proposing a new one.
 """
 
 
@@ -278,7 +320,7 @@ class TypeInferenceAgent:
     def _build_prompt(self, extraction: ExtractionResult, medium: str) -> str:
         """Build the inference prompt from extraction result."""
         parts = [
-            f"Analyze this {medium} observation and propose its type.\n",
+            f"Analyze this {medium} observation and produce a TypeProposal.\n",
             "## Extracted Features\n",
         ]
 
@@ -313,7 +355,16 @@ class TypeInferenceAgent:
             "\n## Instructions\n"
             "1. First, use search_types to find existing types that might match\n"
             "2. Use find_similar_observations to see how similar observations were typed\n"
-            "3. Propose the most appropriate type, slots, and entity hypotheses\n"
+            "3. Produce your TypeProposal with:\n"
+            "   - observation_kind: A low-cardinality routing hint (~20 values)\n"
+            "   - facets: Extracted attributes as key-value pairs\n"
+            "   - entity_seeds: Entity hypotheses with entity_nature for EACH entity\n"
+            "   - deterministic_ids: Any hard identifiers (SKU, GPS, trip_id, etc.)\n"
+            "   - type_candidate OR existing_type_name (not both)\n"
+            "\nRemember:\n"
+            "- Every entity_seed MUST have entity_nature (individual/class/group/event)\n"
+            "- observation_kind is for routing only (~20 values), not type tracking\n"
+            "- Semantic type labeling goes through type_candidate/existing_type_name\n"
         )
 
         return "".join(parts)

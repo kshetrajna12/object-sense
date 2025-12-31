@@ -135,12 +135,23 @@ async def ingest_file(file_path: Path, verbose: bool = False) -> dict:
         inference_agent = TypeInferenceAgent()
         type_proposal = await inference_agent.infer(extraction_result, medium=medium.value)
 
+        # Determine the type name from the proposal
+        # New schema has type_candidate (for new) or existing_type_name (for existing)
+        is_new_type = type_proposal.type_candidate is not None
+        if type_proposal.type_candidate:
+            type_name = type_proposal.type_candidate.proposed_name
+        elif type_proposal.existing_type_name:
+            type_name = type_proposal.existing_type_name
+        else:
+            # Fallback to observation_kind if neither is set
+            type_name = type_proposal.observation_kind
+
         # Create or get type
         # Note: In full implementation, this would go through TypeCandidate first.
         # For now, we create stable types directly to maintain CLI functionality.
         stable_type = await get_or_create_type(
             session,
-            type_proposal.primary_type,
+            type_name,
             TypeCreatedVia.LLM_PROPOSED,
         )
 
@@ -158,16 +169,21 @@ async def ingest_file(file_path: Path, verbose: bool = False) -> dict:
 
         # Create observation
         observation_id = uuid4()
-        # Convert SlotValue list to dict for JSONB storage
-        slots_dict = {slot.name: slot.value for slot in type_proposal.slots}
+        # Convert deterministic_ids to JSONB-compatible format
+        deterministic_ids = [
+            {"id_type": d.id_type, "id_value": d.id_value, "id_namespace": d.id_namespace}
+            for d in type_proposal.deterministic_ids
+        ]
         obs = Observation(
             observation_id=observation_id,
             medium=medium,
             stable_type_id=stable_type.type_id,
             source_id=str(file_path.absolute()),
             blob_id=blob.blob_id,
-            slots=slots_dict,
-            observation_kind=type_proposal.primary_type,  # Routing hint
+            slots={},  # Slots are now per-entity in entity_seeds
+            observation_kind=type_proposal.observation_kind,  # Routing hint
+            facets=type_proposal.facets,  # Extracted attributes
+            deterministic_ids=deterministic_ids,
             status=ObservationStatus.ACTIVE,
         )
         session.add(obs)
@@ -212,7 +228,7 @@ async def ingest_file(file_path: Path, verbose: bool = False) -> dict:
             score=0.8,  # Default confidence
             details={
                 "reasoning": type_proposal.reasoning,
-                "is_existing_type": type_proposal.is_existing_type,
+                "is_new_type": is_new_type,
             },
         )
         session.add(evidence)
@@ -224,10 +240,10 @@ async def ingest_file(file_path: Path, verbose: bool = False) -> dict:
 
         return {
             "observation_id": str(observation_id),
-            "type": type_proposal.primary_type,
+            "type": type_name,
             "medium": medium.value,
             "status": "ingested",
-            "slots": type_proposal.slots,
+            "facets": type_proposal.facets,
             "reasoning": type_proposal.reasoning,
         }
 
