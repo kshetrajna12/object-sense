@@ -1,5 +1,13 @@
 # Design Notes — Object Sense Engine
 
+> **Note (2025-12):** This file contains historical design discussions. For the current authoritative design, see:
+> - `design_v2_corrections.md` — Type Authority & Entity Resolution Clarifications (active spec)
+> - `concept_v1.md` — Original concept document (reference only)
+>
+> After implementation stabilizes, a unified `concept_v2.md` will replace these.
+
+---
+
 ## Discussion Log
 
 ### Topic: Bootstrap Problem
