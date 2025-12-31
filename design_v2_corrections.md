@@ -143,6 +143,8 @@ If downstream systems trust `primary_type_id` for identity decisions, you get **
   - Set only after Type promotion (Correction #7)
   - Can remain NULL for observations that don't fit stable types
 
+> **Terminology note:** The column is named `stable_type_id`; in prose we may also call it "promoted type". These refer to the same concept.
+
 **The three-level type reference:**
 
 | Field | Purpose | Cardinality | Mutability |
@@ -150,6 +152,24 @@ If downstream systems trust `primary_type_id` for identity decisions, you get **
 | `observation_kind` | Routing hint | Low (~20 values) | Can flip freely |
 | `candidate_type_id` | LLM's type proposal | High (all candidates) | Changes on merge/alias |
 | `stable_type_id` | Promoted ontological type | Medium (stable types) | Set once on promotion |
+
+**CRITICAL: observation_kind vs candidate_type_id**
+
+These are NOT the same thing:
+
+- **`observation_kind`** is a **low-cardinality routing string** (e.g., "wildlife_photo", "product_record", "json_config")
+  - Fixed vocabulary (~20 values max)
+  - Used ONLY for pipeline routing and soft search filtering
+  - Does NOT reference type_candidates table
+  - Does NOT track LLM's specific type proposals
+
+- **`candidate_type_id`** is the **FK to type_candidates**
+  - High cardinality (one per LLM-proposed type label)
+  - Tracks the actual type proposal
+  - Follows merge chains when candidates consolidate
+  - Eventually promotes to stable_type_id
+
+All semantic type labeling flows through `candidate_type_id`, not `observation_kind`.
 
 #### Rationale
 
@@ -381,9 +401,15 @@ def resolve_entities(observation, entity_seeds):
         entity = lookup_by_deterministic_id(det_id)
         if entity:
             links.append(Link(entity, posterior=1.0, status='hard'))
-            continue  # Skip similarity search for this entity
+        else:
+            # ID not found → CREATE entity anchored to this ID
+            entity = create_entity_for_deterministic_id(det_id)
+            links.append(Link(entity, posterior=1.0, status='hard'))
+        continue  # Deterministic ID handled; skip similarity search
 
     # 2. For each entity seed from LLM
+    # Note: Deterministic ID resolution is per-seed. Seeds without IDs
+    # (e.g., species, location, event) are still resolved via similarity.
     for seed in entity_seeds:
         # Get candidate pool (routing hint used HERE as soft filter)
         candidates = get_entity_candidates(
@@ -509,21 +535,29 @@ CREATE TABLE entity_evolution (
   created_at TIMESTAMP NOT NULL DEFAULT now(),
   evidence JSONB
 );
-
--- Helper view for canonical resolution (follows chain)
-CREATE OR REPLACE FUNCTION resolve_canonical(eid UUID) RETURNS UUID AS $$
-DECLARE
-  current UUID := eid;
-  next UUID;
-BEGIN
-  LOOP
-    SELECT canonical_entity_id INTO next FROM entities WHERE entity_id = current;
-    IF next IS NULL THEN RETURN current; END IF;
-    current := next;
-  END LOOP;
-END;
-$$ LANGUAGE plpgsql STABLE;
 ```
+
+**Canonical resolution is REQUIRED but implementation is flexible:**
+
+Queries must resolve to canonical entities. Implementation options (v0 chooses one):
+
+1. **App-layer pointer chasing** — Python follows `canonical_entity_id` chain
+2. **DB helper function** — PL/pgSQL or SQL recursive CTE
+3. **Materialized view** — Pre-computed canonical mappings, refreshed on merge
+
+Example (app-layer):
+```python
+def resolve_canonical(entity_id: UUID, session: Session) -> UUID:
+    """Follow canonical_entity_id chain to find current canonical."""
+    current = entity_id
+    while True:
+        entity = session.get(Entity, current)
+        if entity.canonical_entity_id is None:
+            return current
+        current = entity.canonical_entity_id
+```
+
+The requirement is that consumers always get canonical entities. The mechanism is an implementation detail.
 
 **Merge semantics:**
 1. Create merged entity (target_entity_id)
@@ -758,7 +792,7 @@ Your own v1 Open Questions section hints at this:
 **Stored in:** `type_candidates` table (separate from `types`)
 
 **Can be used for:**
-- Routing hints (observation_kind references candidate names)
+- Type labeling via `observations.candidate_type_id` FK
 - UI display as "tentative label"
 - Similarity search ("find candidates near this name")
 
@@ -766,6 +800,8 @@ Your own v1 Open Questions section hints at this:
 - Hard identity gating
 - Schema enforcement
 - Downstream consumer APIs (too unstable)
+
+**Note:** `observation_kind` is a separate low-cardinality routing field. TypeCandidates are referenced via `candidate_type_id` FK, not via observation_kind.
 
 ##### Stage B: Type (Promoted, Stable)
 
@@ -881,6 +917,17 @@ The lifecycle handles duplicates:
 4. Set `merged_into_candidate_id` on merged candidates
 5. Observations follow the merge chain via `candidate_type_id`
 
+**TypeCandidate merge-chain resolution:**
+
+When candidates merge via `merged_into_candidate_id`, observations must resolve to the canonical candidate.
+
+Resolution strategy (v0 chooses one):
+- **Write-time:** When a candidate is merged, update all observations' `candidate_type_id` to the merge target
+- **Query-time:** Follow `merged_into_candidate_id` chain at read time (like entity canonical resolution)
+
+Write-time is simpler for v0 but requires migration on each merge.
+Query-time is more flexible but adds read complexity.
+
 **Modified schema:**
 - `observations.candidate_type_id` references `type_candidates.candidate_id` (FK, nullable)
 - `observations.stable_type_id` references `types.type_id` (FK, nullable)
@@ -950,8 +997,29 @@ Similarity signals (embeddings, facets) only help:
 ### Resolution priority:
 
 1. **Deterministic ID match** → link with `posterior=1.0, status='hard'`
-2. **No ID or ID not in system** → fall back to similarity clustering
-3. **ID conflict** (same ID, incompatible attributes) → flag for review, trust ID over similarity
+2. **Deterministic ID not found** → **CREATE entity for this ID**, then hard link
+3. **No deterministic ID** → fall back to similarity clustering
+4. **ID conflict** (same ID, incompatible attributes) → flag for review, trust ID over similarity
+
+**CRITICAL: Deterministic IDs can CREATE entities**
+
+When an observation has a deterministic ID that doesn't exist in the system:
+- The resolver MUST create an entity anchored to that ID
+- This prevents duplicate entities for first-time IDs
+- The ID becomes the entity's identity anchor
+
+```python
+def resolve_deterministic_id(id_type, id_value, id_namespace):
+    entity = lookup_by_deterministic_id(id_type, id_value, id_namespace)
+    if entity:
+        return Link(entity, posterior=1.0, status='hard')
+    else:
+        # CREATE entity anchored to this ID
+        entity = create_entity_for_id(id_type, id_value, id_namespace)
+        return Link(entity, posterior=1.0, status='hard')
+```
+
+This ensures that two observations with the same SKU always link to the same entity, even if the first observation creates it.
 
 ### Anti-pattern to avoid:
 
@@ -1423,9 +1491,11 @@ IDENTITY_CONFLICTS                    ENTITY_EVOLUTION
 │  1. Deterministic ID check (HIGHEST PRIORITY)               │
 │     → IDs are (id_type, id_value, id_namespace) tuples      │
 │     → If match: hard link (posterior=1.0)                   │
+│     → If NOT found: CREATE entity for ID, then hard link    │
 │     → If conflict: create identity_conflicts row            │
 │                                                              │
-│  2. For each entity_seed:                                   │
+│  2. For each entity_seed (per-seed ID check; non-ID seeds    │
+│     still resolved via similarity):                          │
 │     a. Get candidates (routing hint as soft filter)         │
 │     b. Compute similarity (signal weights per entity_nature)│
 │     c. Apply thresholds (T_link, T_new, T_margin)           │
