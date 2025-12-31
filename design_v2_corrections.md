@@ -132,10 +132,24 @@ If downstream systems trust `primary_type_id` for identity decisions, you get **
 - `observations.primary_type_id` (foreign key)
   - Replace with `observations.observation_kind` (string)
 
+**Add immediately (LLM-assigned, mutable):**
+- `observations.candidate_type_id` (foreign key to `type_candidates`, nullable)
+  - Set by Step 4B when LLM proposes a type
+  - Can change as candidates merge/alias
+  - Distinct from `observation_kind` (routing hint, low-cardinality string)
+
 **Add later (after entity stabilization):**
-- `observations.stable_type_id` (foreign key, nullable)
+- `observations.stable_type_id` (foreign key to `types`, nullable)
   - Set only after Type promotion (Correction #7)
   - Can remain NULL for observations that don't fit stable types
+
+**The three-level type reference:**
+
+| Field | Purpose | Cardinality | Mutability |
+|-------|---------|-------------|------------|
+| `observation_kind` | Routing hint | Low (~20 values) | Can flip freely |
+| `candidate_type_id` | LLM's type proposal | High (all candidates) | Changes on merge/alias |
+| `stable_type_id` | Promoted ontological type | Medium (stable types) | Set once on promotion |
 
 #### Rationale
 
@@ -152,10 +166,11 @@ If downstream systems trust `primary_type_id` for identity decisions, you get **
 #### Implementation Impact
 
 **Schema changes:**
-- Add `observations.observation_kind: string` (not FK)
+- Add `observations.observation_kind: string` (routing hint, not FK)
 - Add `observations.facets: JSONB`
+- Add `observations.candidate_type_id: FK → type_candidates | null` (LLM-assigned)
 - Remove `observations.primary_type_id: FK`
-- Add `observations.stable_type_id: FK | null` (set later)
+- Add `observations.stable_type_id: FK → types | null` (set after promotion)
 
 **Code changes:**
 - Type inference agent outputs `observation_kind` instead of `primary_type`
@@ -290,12 +305,15 @@ This resolves the philosophical tension:
 CREATE TABLE type_candidates (
   candidate_id UUID PRIMARY KEY,
   proposed_name VARCHAR NOT NULL,
+  normalized_name VARCHAR NOT NULL,  -- for dedup detection
   status VARCHAR DEFAULT 'proposed',  -- proposed | promoted | merged | rejected
+  merged_into_candidate_id UUID REFERENCES type_candidates(candidate_id),
   promoted_to_type_id UUID REFERENCES types(type_id),
   evidence_count INT DEFAULT 1,
   created_at TIMESTAMP,
   updated_at TIMESTAMP
 );
+-- No UNIQUE constraint on proposed_name (see §7 for rationale)
 ```
 
 **Modified table:** `types`
@@ -401,8 +419,50 @@ def resolve_entities(observation, entity_seeds):
             proto = create_proto_entity(seed, observation)
             links.append(Link(proto, posterior=0.8, status='soft'))
 
-    # 5. Store all links
+    # 5. Multi-seed consistency pass (lightweight reconciliation)
+    links = reconcile_multi_seed_links(links, entity_seeds)
+
+    # 6. Store all links
     return links
+
+
+def reconcile_multi_seed_links(links, entity_seeds):
+    """
+    Lightweight consistency check across all seeds from one observation.
+
+    Detects contradictions like:
+    - Same entity linked with conflicting roles
+    - Multiple seeds resolving to same entity with incompatible facets
+    - Circular references (entity A member of B, B member of A)
+
+    Does NOT do heavy logic in v0 — just flags and downweights.
+    """
+    # Group links by entity
+    by_entity = defaultdict(list)
+    for link in links:
+        by_entity[link.entity_id].append(link)
+
+    reconciled = []
+    for entity_id, entity_links in by_entity.items():
+        if len(entity_links) == 1:
+            reconciled.append(entity_links[0])
+            continue
+
+        # Multiple seeds linking to same entity — check consistency
+        if has_role_conflict(entity_links):
+            # Downweight all conflicting links
+            for link in entity_links:
+                link.posterior *= 0.5
+                link.flags.append('multi_seed_role_conflict')
+
+        if has_facet_contradiction(entity_links, entity_seeds):
+            # Flag for review but don't reject
+            for link in entity_links:
+                link.flags.append('multi_seed_facet_conflict')
+
+        reconciled.extend(entity_links)
+
+    return reconciled
 ```
 
 ### Decision Thresholds (Configurable)
@@ -422,29 +482,64 @@ def resolve_entities(observation, entity_seeds):
    - Per-entity_nature calibration (individuals vs. classes need different thresholds)
    - Active learning on margin cases
 
-### Entity Versioning
+### Entity Versioning & Canonical Resolution
 
-**Critical: Entity IDs must be versioned.**
+**Critical: Entity IDs must be versioned with canonical resolution.**
 
 When entities merge or split:
 - Generate new `entity_id` for merged/split result
 - Store merge/split event in `entity_evolution` table
-- Observations keep links to old IDs + new IDs (both valid)
-- Consumers see "lineage" not "broken IDs"
+- Update `canonical_entity_id` on merged source entities
+- Observations keep links to old IDs (still valid for history)
+- Consumers resolve via `canonical_entity_id` for current truth
 
-This prevents the "ontology stability for consumers" problem (see v1 Open Questions).
+**Canonical resolution mechanism:**
 
 ```sql
+-- Add to entities table
+ALTER TABLE entities ADD COLUMN canonical_entity_id UUID REFERENCES entities(entity_id);
+-- NULL means "I am canonical"; non-NULL points to current canonical entity
+
+-- Entity evolution tracks history
 CREATE TABLE entity_evolution (
   event_id UUID PRIMARY KEY,
-  event_type VARCHAR,  -- merge | split
-  source_entity_ids UUID[],
-  target_entity_id UUID,
-  created_at TIMESTAMP,
+  event_type VARCHAR NOT NULL,  -- merge | split
+  source_entity_ids UUID[] NOT NULL,
+  target_entity_id UUID NOT NULL REFERENCES entities(entity_id),
+  created_at TIMESTAMP NOT NULL DEFAULT now(),
   evidence JSONB
 );
+
+-- Helper view for canonical resolution (follows chain)
+CREATE OR REPLACE FUNCTION resolve_canonical(eid UUID) RETURNS UUID AS $$
+DECLARE
+  current UUID := eid;
+  next UUID;
+BEGIN
+  LOOP
+    SELECT canonical_entity_id INTO next FROM entities WHERE entity_id = current;
+    IF next IS NULL THEN RETURN current; END IF;
+    current := next;
+  END LOOP;
+END;
+$$ LANGUAGE plpgsql STABLE;
 ```
-```
+
+**Merge semantics:**
+1. Create merged entity (target_entity_id)
+2. Set `canonical_entity_id = target_entity_id` on all source entities
+3. Record in entity_evolution
+4. ObservationEntityLinks remain valid (point to source)
+5. Queries use `resolve_canonical()` to get current entity
+
+**Split semantics:**
+1. Create new child entities
+2. Original entity either:
+   - Remains canonical (children are new observations)
+   - Gets deprecated (set canonical to one of children)
+3. Record in entity_evolution with evidence explaining split
+
+This prevents the "ontology stability for consumers" problem (see v1 Open Questions).
 
 #### Rationale
 
@@ -515,31 +610,59 @@ If you use one resolver:
 - `group` — Collections with membership (Kambula Pride, Safari Trip 2024-06-12)
 - `event` — Temporal occurrences (Hunt Event, Feeding Event, Purchase Transaction)
 
-**Add resolution strategy per entity_nature:**
+**CRITICAL CLARIFICATION: Signal weighting, not separate pipelines**
+
+> `entity_nature` selects **signal weighting profiles**, not separate pipelines.
+>
+> There is ONE entity resolver with shared machinery. The `entity_nature` determines
+> which signals are weighted heavily vs. lightly for similarity computation.
+
+This preserves the anti-domain-partitioning principle (Correction #10).
+
+**Signal weighting profiles per entity_nature:**
 
 ```python
-# In Step 5 entity resolution
+# In Step 5 entity resolution — ONE resolver, different weights
 
-def get_resolution_strategy(entity_nature):
-    strategies = {
-        'individual': IndividualResolver(
-            # Uses: perceptual re-ID, locality, deterministic IDs
-            signals=['embedding', 'signature', 'location', 'timestamp', 'ids']
-        ),
-        'class': ClassResolver(
-            # Uses: language agreement, recurrence, facet consistency
-            signals=['text_embedding', 'facet_agreement', 'name_match']
-        ),
-        'group': GroupResolver(
-            # Uses: member tracking, shared context, location clustering
-            signals=['member_overlap', 'location', 'temporal_proximity']
-        ),
-        'event': EventResolver(
-            # Uses: temporal clustering, participant linking
-            signals=['timestamp', 'participants', 'location', 'duration']
-        )
-    }
-    return strategies[entity_nature]
+# Signal weight profiles (sum to 1.0 per nature)
+SIGNAL_WEIGHTS = {
+    'individual': {
+        'embedding': 0.35,      # Visual/perceptual re-ID
+        'signature': 0.25,      # pHash, rosette patterns
+        'location': 0.15,       # Locality prior
+        'timestamp': 0.10,      # Temporal proximity
+        'deterministic_id': 0.15,  # Hard IDs if present
+    },
+    'class': {
+        'text_embedding': 0.40,    # Language/semantic agreement
+        'facet_agreement': 0.30,   # Attribute consistency
+        'name_match': 0.20,        # Exact/fuzzy name matching
+        'deterministic_id': 0.10,  # Taxonomic IDs if present
+    },
+    'group': {
+        'member_overlap': 0.35,    # Shared members
+        'location': 0.25,          # Spatial clustering
+        'temporal_proximity': 0.25, # Time-based grouping
+        'deterministic_id': 0.15,  # Group IDs if present
+    },
+    'event': {
+        'timestamp': 0.30,         # Temporal clustering
+        'participants': 0.30,      # Entity involvement
+        'location': 0.20,          # Where it happened
+        'duration': 0.10,          # Temporal extent
+        'deterministic_id': 0.10,  # Event IDs if present
+    },
+}
+
+def compute_entity_similarity(observation, candidate, entity_nature):
+    """ONE resolver function, different weights per nature."""
+    weights = SIGNAL_WEIGHTS[entity_nature]
+    total = 0.0
+    for signal, weight in weights.items():
+        if weight > 0:
+            score = compute_signal_similarity(observation, candidate, signal)
+            total += weight * score
+    return total
 ```
 
 **Update EntityHypothesis schema:**
@@ -726,8 +849,10 @@ Even promoted Types can:
 ```sql
 CREATE TABLE type_candidates (
   candidate_id UUID PRIMARY KEY,
-  proposed_name VARCHAR NOT NULL UNIQUE,
-  status VARCHAR DEFAULT 'proposed',
+  proposed_name VARCHAR NOT NULL,
+  normalized_name VARCHAR NOT NULL,  -- lowercase, stripped, for dedup detection
+  status VARCHAR DEFAULT 'proposed',  -- proposed | promoted | merged | rejected
+  merged_into_candidate_id UUID REFERENCES type_candidates(candidate_id),
   promoted_to_type_id UUID REFERENCES types(type_id),
   evidence_count INT DEFAULT 1,
   coherence_score FLOAT,
@@ -735,10 +860,29 @@ CREATE TABLE type_candidates (
   updated_at TIMESTAMP,
   last_referenced_at TIMESTAMP
 );
+
+-- NO global UNIQUE on proposed_name
+-- Duplicates allowed; merge/alias lifecycle handles consolidation
+CREATE INDEX idx_type_candidates_normalized ON type_candidates(normalized_name);
 ```
 
+**Design decision: Allow duplicate candidate names**
+
+Why no UNIQUE constraint:
+- LLM may propose "wildlife_photo" and "Wildlife Photo" separately
+- Different observations may propose semantically identical types
+- Merge/alias lifecycle consolidates these over time
+- Forcing uniqueness at insert time creates race conditions
+
+The lifecycle handles duplicates:
+1. Insert candidate with proposed_name (no constraint)
+2. Background job detects duplicates via normalized_name
+3. Merge lower-evidence candidates into higher-evidence ones
+4. Set `merged_into_candidate_id` on merged candidates
+5. Observations follow the merge chain via `candidate_type_id`
+
 **Modified schema:**
-- `observations.observation_kind` references `type_candidates.proposed_name` (string, not FK)
+- `observations.candidate_type_id` references `type_candidates.candidate_id` (FK, nullable)
 - `observations.stable_type_id` references `types.type_id` (FK, nullable)
 
 **Background jobs:**
@@ -853,19 +997,52 @@ Similarity is a fallback for when you don't have IDs or need to cluster unidenti
 #### Implementation Impact
 
 **Schema changes:**
+
+Deterministic IDs must be stored as **(id_type, id_value, id_namespace)** tuples:
+
 - Add `observations.deterministic_ids: JSONB` to store extracted IDs
   ```json
-  {
-    "sku": "PROD-12345",
-    "product_id": "abc-xyz",
-    "trip_id": "safari-2024-06-12"
-  }
+  [
+    {"id_type": "sku", "id_value": "PROD-12345", "id_namespace": "acme_corp"},
+    {"id_type": "product_id", "id_value": "abc-xyz", "id_namespace": "internal"},
+    {"id_type": "gps", "id_value": "-25.7461,28.1881", "id_namespace": "wgs84"}
+  ]
   ```
 
+**Why namespace matters:**
+- SKU "12345" from Acme Corp ≠ SKU "12345" from Beta Inc
+- product_id is only unique within a source system
+- GPS coordinates need datum specification
+
+**New table: `identity_conflicts`**
+
+When deterministic ID matches but attributes conflict:
+
+```sql
+CREATE TABLE identity_conflicts (
+  conflict_id UUID PRIMARY KEY,
+  observation_id UUID NOT NULL REFERENCES observations(observation_id),
+  entity_id UUID NOT NULL REFERENCES entities(entity_id),
+  id_type VARCHAR NOT NULL,
+  id_value VARCHAR NOT NULL,
+  id_namespace VARCHAR NOT NULL,
+  conflict_type VARCHAR NOT NULL,  -- attribute_mismatch | duplicate_entry | id_collision
+  conflict_details JSONB NOT NULL, -- what specifically conflicts
+  resolution_status VARCHAR DEFAULT 'pending',  -- pending | resolved | ignored
+  resolved_by UUID,  -- user or system that resolved
+  resolved_at TIMESTAMP,
+  created_at TIMESTAMP NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_identity_conflicts_pending
+  ON identity_conflicts(resolution_status) WHERE resolution_status = 'pending';
+```
+
 **Code changes:**
-- Feature extraction must detect and extract deterministic IDs
+- Feature extraction must detect and extract deterministic IDs as tuples
 - Entity resolver checks IDs **before** running similarity search
-- Conflict detection when IDs match but attributes don't
+- On ID match with attribute conflict → create `identity_conflicts` row
+- Resolution UI/API for human review of conflicts
 
 **Prompt changes:**
 - Type inference agent must extract deterministic IDs from facets
@@ -1132,11 +1309,14 @@ BLOB                     OBSERVATION              TYPE_CANDIDATE          TYPE
 │ blob_id  │◀──────────│observation│             │candidate │            │ type_id  │
 │ sha256   │            │  _id     │             │  _id     │◀───────────│ name     │
 │ size     │            │ medium   │             │ proposed │            │ parent   │
-└──────────┘            │ obs_kind │──references─▶  _name   │            │ embedding│
-                        │ facets   │             │ status   │            │ status   │
-                        │ stable_  │─────────────────────────────────────▶│ evidence │
-                        │  type_id │             │ promoted_│            │  _count  │
-                        └────┬─────┘             │  to_type │            └────┬─────┘
+└──────────┘            │ obs_kind │             │  _name   │            │ embedding│
+                        │ facets   │             │normalized│            │ status   │
+                        │ det_ids  │             │  _name   │            │ evidence │
+                        │candidate_│─FK──────────▶│ merged_  │            │  _count  │
+                        │ type_id  │             │  into_id │            └────┬─────┘
+                        │ stable_  │─FK──────────────────────────────────────▶│
+                        │  type_id │             │ promoted_│                 │
+                        └────┬─────┘             │  to_type │                 │
                              │                   └──────────┘                 │
                              │ links to                                       │
                              ▼                                                │
@@ -1145,30 +1325,50 @@ BLOB                     OBSERVATION              TYPE_CANDIDATE          TYPE
                         │          │
                         │ entity_id│
                         │ type_id  │
-                        │ entity_  │
-                        │  nature  │  ← NEW: individual | class | group | event
+                        │ entity_  │  ← individual | class | group | event
+                        │  nature  │
+                        │canonical_│  ← NULL = I am canonical; else → merged target
+                        │entity_id │
                         │ slots    │
                         │confidence│
                         └──────────┘
+
+IDENTITY_CONFLICTS                    ENTITY_EVOLUTION
+(ID match + attr conflict)            (merge/split history)
+┌──────────────┐                      ┌──────────────┐
+│ conflict_id  │                      │ event_id     │
+│observation_id│                      │ event_type   │  ← merge | split
+│ entity_id    │                      │ source_ids[] │
+│ id_type      │                      │ target_id    │
+│ id_value     │                      │ evidence     │
+│ id_namespace │                      └──────────────┘
+│ conflict_type│
+│ status       │
+└──────────────┘
 ```
 
 ### New/Modified Tables
 
 **New:**
 - `type_candidates` — Provisional type labels (Stage A)
+  - No UNIQUE on proposed_name (duplicates allowed, merge handles consolidation)
+  - Has `normalized_name` index for dedup detection
+  - Has `merged_into_candidate_id` for merge chains
 - `entity_evolution` — Merge/split tracking for entity versioning
-- `conflict_reviews` — Flagged ID conflicts for human review
+- `identity_conflicts` — Deterministic ID conflicts for human review
 
 **Modified:**
 - `objects` → `observations`
-  - Add: `observation_kind` (string, routing hint)
+  - Add: `observation_kind` (string, routing hint, low-cardinality)
   - Add: `facets` (JSONB, extracted attributes)
-  - Add: `deterministic_ids` (JSONB, extracted IDs)
+  - Add: `deterministic_ids` (JSONB array of {id_type, id_value, id_namespace})
+  - Add: `candidate_type_id` (FK → type_candidates, LLM-assigned, mutable)
   - Remove: `primary_type_id` (FK)
-  - Add: `stable_type_id` (FK, nullable)
+  - Add: `stable_type_id` (FK → types, nullable, set after promotion)
 
 - `entities`
   - Add: `entity_nature` (string: individual | class | group | event)
+  - Add: `canonical_entity_id` (FK → entities, NULL = canonical, else merged target)
 
 - `types`
   - Only contains promoted types (stable)
@@ -1221,22 +1421,28 @@ BLOB                     OBSERVATION              TYPE_CANDIDATE          TYPE
 │  STEP 5: ENTITY RESOLUTION                                  │
 │                                                              │
 │  1. Deterministic ID check (HIGHEST PRIORITY)               │
+│     → IDs are (id_type, id_value, id_namespace) tuples      │
 │     → If match: hard link (posterior=1.0)                   │
+│     → If conflict: create identity_conflicts row            │
 │                                                              │
 │  2. For each entity_seed:                                   │
 │     a. Get candidates (routing hint as soft filter)         │
-│     b. Compute multi-signal similarity                      │
+│     b. Compute similarity (signal weights per entity_nature)│
 │     c. Apply thresholds (T_link, T_new, T_margin)           │
 │     d. Create ObservationEntityLink(s)                      │
 │                                                              │
-│  3. Resolution strategy per entity_nature:                  │
-│     • individual → perceptual re-ID                         │
-│     • class → language agreement                            │
-│     • group → member tracking                               │
-│     • event → temporal clustering                           │
+│  3. entity_nature = signal weighting (NOT separate pipes):  │
+│     • individual → weight: embedding, signature, location   │
+│     • class → weight: text_embedding, facet_agreement       │
+│     • group → weight: member_overlap, temporal_proximity    │
+│     • event → weight: timestamp, participants, location     │
 │                                                              │
-│  4. Update entity confidence, slots                         │
-│  5. Generate MergeProposal / SplitProposal if needed        │
+│  4. Multi-seed consistency pass (lightweight):              │
+│     → Detect role conflicts, facet contradictions           │
+│     → Downweight or flag conflicting links                  │
+│                                                              │
+│  5. Update entity confidence, slots                         │
+│  6. Generate MergeProposal / SplitProposal if needed        │
 └────────────────────────┬────────────────────────────────────┘
                          ▼
 ┌─────────────────────────────────────────────────────────────┐
@@ -1271,17 +1477,25 @@ BLOB                     OBSERVATION              TYPE_CANDIDATE          TYPE
    - Update all code references
 
 2. **Add new fields to `observations`:**
-   - `observation_kind: string`
+   - `observation_kind: string` (routing hint)
    - `facets: JSONB`
-   - `deterministic_ids: JSONB`
-   - `stable_type_id: FK | null`
+   - `deterministic_ids: JSONB` (array of {id_type, id_value, id_namespace})
+   - `candidate_type_id: FK → type_candidates | null`
+   - `stable_type_id: FK → types | null`
    - Remove `primary_type_id`
 
-3. **Add `entity_nature` to `entities`**
+3. **Add fields to `entities`:**
+   - `entity_nature: string` (individual | class | group | event)
+   - `canonical_entity_id: FK → entities | null` (merge chain)
 
 4. **Create `type_candidates` table**
+   - No UNIQUE on proposed_name
+   - Add `normalized_name` index for dedup
+   - Add `merged_into_candidate_id` for merge chain
 
 5. **Create `entity_evolution` table**
+
+6. **Create `identity_conflicts` table**
 
 ### Phase 3: Code Refactoring
 1. Update type inference agent (Step 4A/4B split)
@@ -1309,13 +1523,13 @@ BLOB                     OBSERVATION              TYPE_CANDIDATE          TYPE
 | # | Change | Impact | Priority |
 |---|--------|--------|----------|
 | 1 | Object → Observation | Breaking, clarifies terminology | HIGH |
-| 2 | Split Type into routing vs. ontological | Schema change, philosophical fix | HIGH |
+| 2 | Split Type into routing vs. ontological | Schema: observation_kind + candidate_type_id + stable_type_id | HIGH |
 | 3 | Type Non-Authoritativeness Contract | Testing discipline | MEDIUM |
 | 4 | Tighten Type definition | Conceptual clarity | LOW |
-| 5 | Explicit Entity Resolution algorithm | New implementation | HIGH |
-| 6 | Add entity_nature field | Schema + code change | HIGH |
-| 7 | TypeCandidate lifecycle | New table + logic | HIGH |
-| 8 | Deterministic ID priority | Algorithm change | HIGH |
+| 5 | Explicit Entity Resolution algorithm | New impl + multi-seed consistency + canonical resolution | HIGH |
+| 6 | Add entity_nature field | Signal weighting profiles, NOT separate pipelines | HIGH |
+| 7 | TypeCandidate lifecycle | No UNIQUE, merge chains, normalized_name index | HIGH |
+| 8 | Deterministic ID priority | (id_type, id_value, id_namespace) + identity_conflicts table | HIGH |
 | 9 | Slot hygiene rules | Validation utilities | MEDIUM |
 | 10 | Anti-goal: no domain partitioning | Testing discipline | MEDIUM |
 
