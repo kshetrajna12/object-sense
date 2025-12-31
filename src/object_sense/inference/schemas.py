@@ -234,19 +234,15 @@ class TypeProposal(BaseModel):
     )
 
     # ── Step 4B: Type Candidate Proposal ─────────────────────────────────────
+    # CRITICAL: Step 4 can ONLY propose type candidates. It cannot bind to
+    # existing types. Matching/dedup is done by the engine via normalize_type_name()
+    # and find_similar_candidates(). This enforces "LLM proposes, engine decides."
     type_candidate: TypeCandidateProposal | None = Field(
         default=None,
         description=(
-            "If proposing a NEW type label, include details here. "
-            "Creates a TypeCandidate row (not a stable Type). "
-            "Leave None if reusing an existing type."
-        ),
-    )
-    existing_type_name: str | None = Field(
-        default=None,
-        description=(
-            "If reusing an existing TypeCandidate/Type, name it here. "
-            "Mutually exclusive with type_candidate (one must be set)."
+            "If proposing a type label, include details here. "
+            "Creates or matches a TypeCandidate row (engine does dedup). "
+            "Leave None if no type proposal (rare - usually propose something)."
         ),
     )
 

@@ -40,6 +40,7 @@ from object_sense.models import (
     TypeCreatedVia,
     TypeStatus,
 )
+from object_sense.services.type_candidate import TypeCandidateService
 from object_sense.utils.medium import probe_medium
 
 app = typer.Typer(
@@ -135,25 +136,27 @@ async def ingest_file(file_path: Path, verbose: bool = False) -> dict:
         inference_agent = TypeInferenceAgent()
         type_proposal = await inference_agent.infer(extraction_result, medium=medium.value)
 
-        # Determine the type name from the proposal
-        # New schema has type_candidate (for new) or existing_type_name (for existing)
-        is_new_type = type_proposal.type_candidate is not None
-        if type_proposal.type_candidate:
-            type_name = type_proposal.type_candidate.proposed_name
-        elif type_proposal.existing_type_name:
-            type_name = type_proposal.existing_type_name
-        else:
-            # Fallback to observation_kind if neither is set
-            type_name = type_proposal.observation_kind
+        # Step 4B: Engine resolves type candidate (LLM proposes, engine decides)
+        # The LLM outputs a type_candidate proposal. The engine handles dedup/matching
+        # via normalize_type_name() and find_similar_candidates().
+        type_candidate_service = TypeCandidateService(session)
+        type_candidate = None
+        type_name = None
 
-        # Create or get type
-        # Note: In full implementation, this would go through TypeCandidate first.
-        # For now, we create stable types directly to maintain CLI functionality.
-        stable_type = await get_or_create_type(
-            session,
-            type_name,
-            TypeCreatedVia.LLM_PROPOSED,
-        )
+        if type_proposal.type_candidate:
+            # Engine creates or matches a TypeCandidate (dedup via normalized name)
+            type_candidate, is_new = await type_candidate_service.get_or_create(
+                type_proposal.type_candidate.proposed_name,
+                details={
+                    "rationale": type_proposal.type_candidate.rationale,
+                    "suggested_parent": type_proposal.type_candidate.suggested_parent,
+                    "confidence": type_proposal.type_candidate.confidence,
+                },
+            )
+            type_name = type_candidate.proposed_name
+        else:
+            # Rare: no type proposal. Use observation_kind as fallback label.
+            type_name = type_proposal.observation_kind
 
         # Create blob if needed
         if existing_blob:
@@ -177,7 +180,10 @@ async def ingest_file(file_path: Path, verbose: bool = False) -> dict:
         obs = Observation(
             observation_id=observation_id,
             medium=medium,
-            stable_type_id=stable_type.type_id,
+            # Link to TypeCandidate, NOT stable Type directly.
+            # stable_type_id is set later when TypeCandidate is promoted.
+            candidate_type_id=type_candidate.candidate_id if type_candidate else None,
+            stable_type_id=None,  # Set via promotion, not LLM binding
             source_id=str(file_path.absolute()),
             blob_id=blob.blob_id,
             slots={},  # Slots are now per-entity in entity_seeds
@@ -217,30 +223,32 @@ async def ingest_file(file_path: Path, verbose: bool = False) -> dict:
             )
             session.add(sig)
 
-        # Store evidence for type assignment
-        evidence = Evidence(
-            evidence_id=uuid4(),
-            subject_kind=SubjectKind.OBSERVATION,
-            subject_id=observation_id,
-            predicate="has_type",
-            target_id=stable_type.type_id,
-            source=EvidenceSource.LLM,
-            score=0.8,  # Default confidence
-            details={
-                "reasoning": type_proposal.reasoning,
-                "is_new_type": is_new_type,
-            },
-        )
-        session.add(evidence)
-
-        # Update type evidence count
-        stable_type.evidence_count += 1
+        # Store evidence for type candidate assignment
+        # Note: Evidence points to TypeCandidate, not stable Type.
+        # The LLM proposed a label; the engine created/matched a candidate.
+        if type_candidate:
+            evidence = Evidence(
+                evidence_id=uuid4(),
+                subject_kind=SubjectKind.OBSERVATION,
+                subject_id=observation_id,
+                predicate="has_type_candidate",
+                target_id=type_candidate.candidate_id,
+                source=EvidenceSource.LLM,
+                score=type_proposal.type_candidate.confidence if type_proposal.type_candidate else 0.8,
+                details={
+                    "reasoning": type_proposal.reasoning,
+                    "proposed_name": type_candidate.proposed_name,
+                    "normalized_name": type_candidate.normalized_name,
+                },
+            )
+            session.add(evidence)
 
         await session.commit()
 
         return {
             "observation_id": str(observation_id),
-            "type": type_name,
+            "type_candidate": type_name,  # Note: this is a candidate, not stable type
+            "type_status": "candidate",  # Explicitly mark as tentative
             "medium": medium.value,
             "status": "ingested",
             "facets": type_proposal.facets,

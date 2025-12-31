@@ -173,32 +173,50 @@ class TypeCandidateService:
         """Find a candidate by ID."""
         return await self._session.get(TypeCandidate, candidate_id)
 
-    async def resolve_canonical(self, candidate_id: UUID) -> TypeCandidate | None:
+    async def resolve_canonical(
+        self,
+        candidate_id: UUID,
+        *,
+        compress_path: bool = True,
+    ) -> TypeCandidate | None:
         """Resolve a candidate to its canonical form following merge chains.
 
         If a candidate has been merged, follows merged_into_candidate_id
         until finding the canonical (non-merged) candidate.
 
+        Path compression (enabled by default): After resolving, updates all
+        intermediate candidates to point directly to the canonical. This
+        prevents O(n) chain traversal on subsequent lookups.
+
         Args:
             candidate_id: The candidate ID to resolve.
+            compress_path: If True, update intermediate pointers to canonical.
 
         Returns:
             The canonical TypeCandidate, or None if not found.
         """
         current_id = candidate_id
-        visited: set[UUID] = set()
+        visited: list[UUID] = []  # Ordered list for path compression
 
         while True:
             if current_id in visited:
                 # Circular reference - shouldn't happen, but handle gracefully
                 return None
-            visited.add(current_id)
+            visited.append(current_id)
 
             candidate = await self.find_by_id(current_id)
             if candidate is None:
                 return None
 
             if candidate.merged_into_candidate_id is None:
+                # Found canonical. Apply path compression if enabled.
+                if compress_path and len(visited) > 1:
+                    canonical_id = candidate.candidate_id
+                    # Update all intermediate candidates to point directly to canonical
+                    for intermediate_id in visited[:-1]:  # Exclude canonical itself
+                        intermediate = await self.find_by_id(intermediate_id)
+                        if intermediate and intermediate.merged_into_candidate_id != canonical_id:
+                            intermediate.merged_into_candidate_id = canonical_id
                 return candidate
 
             current_id = candidate.merged_into_candidate_id

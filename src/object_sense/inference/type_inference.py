@@ -118,10 +118,16 @@ Always provide:
 2. **facets**: Extracted attributes as key-value pairs
 3. **entity_seeds**: Entity hypotheses WITH entity_nature for each
 4. **deterministic_ids**: Any hard identifiers found (observation-level)
-5. **type_candidate OR existing_type_name**: Either propose new or reference existing
+5. **type_candidate**: Your proposed type label (the engine handles dedup/matching)
 6. **reasoning**: Brief explanation of your inference
 
-Use search_types to check if a type exists before proposing a new one.
+IMPORTANT: You propose type labels, you don't bind to existing types. The engine will:
+- Normalize your proposed name
+- Find similar existing candidates
+- Merge/dedup as needed
+
+Even if you see a similar type via search_types, still propose your best label.
+The engine decides if it matches an existing candidate.
 """
 
 
@@ -353,18 +359,18 @@ class TypeInferenceAgent:
 
         parts.append(
             "\n## Instructions\n"
-            "1. First, use search_types to find existing types that might match\n"
+            "1. First, use search_types to understand what types exist (for context)\n"
             "2. Use find_similar_observations to see how similar observations were typed\n"
             "3. Produce your TypeProposal with:\n"
             "   - observation_kind: A low-cardinality routing hint (~20 values)\n"
             "   - facets: Extracted attributes as key-value pairs\n"
             "   - entity_seeds: Entity hypotheses with entity_nature for EACH entity\n"
             "   - deterministic_ids: Any hard identifiers (SKU, GPS, trip_id, etc.)\n"
-            "   - type_candidate OR existing_type_name (not both)\n"
+            "   - type_candidate: Your proposed type label (engine handles dedup)\n"
             "\nRemember:\n"
             "- Every entity_seed MUST have entity_nature (individual/class/group/event)\n"
             "- observation_kind is for routing only (~20 values), not type tracking\n"
-            "- Semantic type labeling goes through type_candidate/existing_type_name\n"
+            "- Always propose a type_candidate - the engine will match/dedup it\n"
         )
 
         return "".join(parts)

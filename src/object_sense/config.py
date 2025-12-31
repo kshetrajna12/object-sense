@@ -39,7 +39,9 @@ class Settings(BaseSettings):
     type_promotion_min_evidence: int = 5
 
     # Coherence threshold: promote when cluster tightness > this value
-    type_promotion_min_coherence: float = 0.75
+    # Set to None for v0 - coherence requires stable entity clusters (Phase 4).
+    # Computed and logged, but not used for gating until entity resolution exists.
+    type_promotion_min_coherence: float | None = None
 
     # Time window: candidate must survive this many days without merge/contradiction
     type_promotion_survival_days: int = 7

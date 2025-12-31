@@ -110,15 +110,14 @@ class TestEntityHypothesis:
 class TestTypeProposal:
     """Tests for TypeProposal schema with Step 4A/4B split."""
 
-    def test_minimal_with_existing_type(self) -> None:
+    def test_minimal(self) -> None:
+        # Step 4 can only propose type candidates; it cannot bind to existing types.
         proposal = TypeProposal(
             observation_kind="wildlife_photo",
-            existing_type_name="wildlife_photo",
             reasoning="Image contains wildlife subject",
         )
         assert proposal.observation_kind == "wildlife_photo"
-        assert proposal.existing_type_name == "wildlife_photo"
-        assert proposal.type_candidate is None
+        assert proposal.type_candidate is None  # No type proposal (rare case)
         assert proposal.facets == {}
         assert proposal.entity_seeds == []
         assert proposal.deterministic_ids == []
@@ -153,6 +152,7 @@ class TestTypeProposal:
         assert proposal.type_candidate.proposed_name == "backlit_wildlife_photo"
 
     def test_new_type_proposal(self) -> None:
+        # LLM proposes a new type candidate with rationale and suggested parent
         proposal = TypeProposal(
             observation_kind="wildlife_photo",
             type_candidate=TypeCandidateProposal(
@@ -165,7 +165,7 @@ class TestTypeProposal:
         assert proposal.type_candidate is not None
         assert proposal.type_candidate.proposed_name == "safari_photo"
         assert proposal.type_candidate.suggested_parent == "wildlife_photo"
-        assert proposal.existing_type_name is None
+        # Note: existing_type_name was removed - LLM can only propose, not bind
 
 
 class TestTypeCandidateProposal:
@@ -375,10 +375,13 @@ class TestTypeInferenceAgent:
     @pytest.mark.asyncio
     async def test_infer_calls_agent(self) -> None:
         """Test that infer() calls the underlying pydantic-ai agent."""
-        # Create a mock result with new schema
+        # Create a mock result - LLM proposes type candidate (engine handles dedup)
         mock_proposal = TypeProposal(
             observation_kind="wildlife_photo",
-            existing_type_name="wildlife_photo",
+            type_candidate=TypeCandidateProposal(
+                proposed_name="wildlife_photo",
+                rationale="Image contains wildlife subject",
+            ),
             reasoning="Test reasoning",
         )
 
@@ -399,8 +402,10 @@ class TestTypeInferenceAgent:
             # Verify run was called
             mock_run.assert_called_once()
 
-            # Verify result (new schema)
+            # Verify result (LLM proposes, engine decides)
             assert result.observation_kind == "wildlife_photo"
+            assert result.type_candidate is not None
+            assert result.type_candidate.proposed_name == "wildlife_photo"
             assert result.reasoning == "Test reasoning"
 
     @pytest.mark.asyncio
@@ -408,7 +413,10 @@ class TestTypeInferenceAgent:
         """Test that dependencies are passed correctly to the agent."""
         mock_proposal = TypeProposal(
             observation_kind="product_record",
-            existing_type_name="product_record",
+            type_candidate=TypeCandidateProposal(
+                proposed_name="product_record",
+                rationale="JSON product data detected",
+            ),
             reasoning="JSON product data",
         )
 
