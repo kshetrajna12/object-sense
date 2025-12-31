@@ -18,36 +18,70 @@ if TYPE_CHECKING:
     from object_sense.models.entity import Entity
     from object_sense.models.signature import Signature
     from object_sense.models.type import Type
+    from object_sense.models.type_candidate import TypeCandidate
 
 
 class Observation(Base):
     """A unit of data we received (file, record, frame, note).
 
     Observations are what we ingest. They link TO entities - they are not
-    entities themselves. An Observation has a medium (how it's encoded) and
-    a primary_type (what it IS).
+    entities themselves.
 
-    See design_v2_corrections.md §1 for the Object→Observation rename rationale.
+    Type reference is three-level (see design_v2_corrections.md §2):
+    - observation_kind: Low-cardinality routing hint (~20 values)
+    - candidate_type_id: FK to type_candidates (LLM's type proposal)
+    - stable_type_id: FK to types (promoted ontological type)
     """
 
     __tablename__ = "observations"
 
     observation_id: Mapped[UUID] = mapped_column(primary_key=True)
     medium: Mapped[Medium] = mapped_column(index=True)
-    primary_type_id: Mapped[UUID | None] = mapped_column(ForeignKey("types.type_id"), index=True)
     source_id: Mapped[str] = mapped_column(String(2048), index=True)
     blob_id: Mapped[UUID | None] = mapped_column(ForeignKey("blobs.blob_id"), index=True)
     slots: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     status: Mapped[ObservationStatus] = mapped_column(default=ObservationStatus.ACTIVE)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    # Three-level type reference (Correction #2)
+    observation_kind: Mapped[str | None] = mapped_column(String(64), index=True)
+    """Low-cardinality routing hint (e.g., wildlife_photo, product_record).
+    Does NOT reference type_candidates. Used ONLY for pipeline routing."""
+
+    facets: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    """Extracted attributes from Step 4A (e.g., detected_objects, lighting)."""
+
+    deterministic_ids: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list)
+    """Array of {id_type, id_value, id_namespace} tuples (Correction #8).
+    Examples: SKU, product_id, trip_id, GPS coords."""
+
+    candidate_type_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("type_candidates.candidate_id"), index=True
+    )
+    """FK to type_candidates. LLM-assigned, mutable on merge. All semantic
+    type labeling flows through this, NOT observation_kind."""
+
+    stable_type_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("types.type_id"), index=True
+    )
+    """FK to types. Set only after TypeCandidate promotion (Correction #7).
+    Can remain NULL for observations that don't fit stable types."""
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
     # Relationships
     blob: Mapped[Blob | None] = relationship(back_populates="observations")
-    primary_type: Mapped[Type | None] = relationship(back_populates="observations")
-    entity_links: Mapped[list[ObservationEntityLink]] = relationship(back_populates="observation")
+    candidate_type: Mapped[TypeCandidate | None] = relationship(
+        back_populates="observations"
+    )
+    stable_type: Mapped[Type | None] = relationship(back_populates="observations")
+    entity_links: Mapped[list[ObservationEntityLink]] = relationship(
+        back_populates="observation"
+    )
     signatures: Mapped[list[Signature]] = relationship(back_populates="observation")
 
 

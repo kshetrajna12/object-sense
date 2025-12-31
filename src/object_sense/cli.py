@@ -116,7 +116,7 @@ async def ingest_file(file_path: Path, verbose: bool = False) -> dict:
             if existing_obs:
                 return {
                     "observation_id": str(existing_obs.observation_id),
-                    "type": existing_obs.primary_type_id,
+                    "type": existing_obs.stable_type_id,
                     "medium": existing_obs.medium.value,
                     "status": "duplicate",
                     "message": "Observation already exists",
@@ -136,8 +136,9 @@ async def ingest_file(file_path: Path, verbose: bool = False) -> dict:
         type_proposal = await inference_agent.infer(extraction_result, medium=medium.value)
 
         # Create or get type
-        # Always use LLM_PROPOSED since types come from inference
-        primary_type = await get_or_create_type(
+        # Note: In full implementation, this would go through TypeCandidate first.
+        # For now, we create stable types directly to maintain CLI functionality.
+        stable_type = await get_or_create_type(
             session,
             type_proposal.primary_type,
             TypeCreatedVia.LLM_PROPOSED,
@@ -162,10 +163,11 @@ async def ingest_file(file_path: Path, verbose: bool = False) -> dict:
         obs = Observation(
             observation_id=observation_id,
             medium=medium,
-            primary_type_id=primary_type.type_id,
+            stable_type_id=stable_type.type_id,
             source_id=str(file_path.absolute()),
             blob_id=blob.blob_id,
             slots=slots_dict,
+            observation_kind=type_proposal.primary_type,  # Routing hint
             status=ObservationStatus.ACTIVE,
         )
         session.add(obs)
@@ -205,7 +207,7 @@ async def ingest_file(file_path: Path, verbose: bool = False) -> dict:
             subject_kind=SubjectKind.OBSERVATION,
             subject_id=observation_id,
             predicate="has_type",
-            target_id=primary_type.type_id,
+            target_id=stable_type.type_id,
             source=EvidenceSource.LLM,
             score=0.8,  # Default confidence
             details={
@@ -216,7 +218,7 @@ async def ingest_file(file_path: Path, verbose: bool = False) -> dict:
         session.add(evidence)
 
         # Update type evidence count
-        primary_type.evidence_count += 1
+        stable_type.evidence_count += 1
 
         await session.commit()
 
@@ -315,7 +317,7 @@ def show_observation(
                 stmt = (
                     select(Observation)
                     .options(
-                        selectinload(Observation.primary_type),
+                        selectinload(Observation.stable_type),
                         selectinload(Observation.blob),
                         selectinload(Observation.entity_links),
                         selectinload(Observation.signatures),
@@ -334,7 +336,7 @@ def show_observation(
                 stmt = (
                     select(Observation)
                     .options(
-                        selectinload(Observation.primary_type),
+                        selectinload(Observation.stable_type),
                         selectinload(Observation.blob),
                         selectinload(Observation.entity_links),
                         selectinload(Observation.signatures),
@@ -370,8 +372,8 @@ def show_observation(
             panel_content.append(f"[bold]Status:[/bold] {obs.status.value}")
             panel_content.append(f"[bold]Source:[/bold] {obs.source_id}")
 
-            if obs.primary_type:
-                panel_content.append(f"[bold]Type:[/bold] {obs.primary_type.canonical_name}")
+            if obs.stable_type:
+                panel_content.append(f"[bold]Type:[/bold] {obs.stable_type.canonical_name}")
 
             if obs.blob:
                 panel_content.append(f"[bold]SHA256:[/bold] {obs.blob.sha256[:16]}...")
@@ -596,7 +598,7 @@ def search(
             search_pattern = f"%{query}%"
             stmt = (
                 select(Observation)
-                .options(selectinload(Observation.primary_type))
+                .options(selectinload(Observation.stable_type))
                 .where(Observation.source_id.ilike(search_pattern))
                 .limit(limit)
             )
@@ -615,7 +617,7 @@ def search(
 
             for obs in observations:
                 source = obs.source_id.split("/")[-1] if "/" in obs.source_id else obs.source_id
-                type_name = obs.primary_type.canonical_name if obs.primary_type else "-"
+                type_name = obs.stable_type.canonical_name if obs.stable_type else "-"
                 if full_ids:
                     obs_id = str(obs.observation_id)
                 else:

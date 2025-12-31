@@ -3,29 +3,41 @@
 from object_sense.models.base import Base
 from object_sense.models.blob import Blob
 from object_sense.models.entity import Entity
+from object_sense.models.entity_evolution import EntityEvolution
 from object_sense.models.enums import (
+    EntityEvolutionKind,
+    EntityNature,
     EntityStatus,
     EvidenceSource,
+    IdentityConflictStatus,
     Medium,
     ObservationStatus,
     SubjectKind,
+    TypeCandidateStatus,
     TypeCreatedVia,
     TypeEvolutionKind,
     TypeStatus,
 )
 from object_sense.models.evidence import Evidence
+from object_sense.models.identity_conflict import IdentityConflict
 from object_sense.models.observation import Observation, ObservationEntityLink
 from object_sense.models.signature import Signature
 from object_sense.models.type import Type
+from object_sense.models.type_candidate import TypeCandidate
 from object_sense.models.type_evolution import TypeEvolution
 
 __all__ = [
     "Base",
     "Blob",
     "Entity",
+    "EntityEvolution",
+    "EntityEvolutionKind",
+    "EntityNature",
     "EntityStatus",
     "Evidence",
     "EvidenceSource",
+    "IdentityConflict",
+    "IdentityConflictStatus",
     "Medium",
     "Observation",
     "ObservationEntityLink",
@@ -33,6 +45,8 @@ __all__ = [
     "Signature",
     "SubjectKind",
     "Type",
+    "TypeCandidate",
+    "TypeCandidateStatus",
     "TypeCreatedVia",
     "TypeEvolution",
     "TypeEvolutionKind",
