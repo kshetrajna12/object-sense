@@ -14,7 +14,7 @@ from object_sense.models.base import Base
 from object_sense.models.enums import EntityStatus
 
 if TYPE_CHECKING:
-    from object_sense.models.object import ObjectEntityLink
+    from object_sense.models.observation import ObservationEntityLink
     from object_sense.models.type import Type
 
 
@@ -40,4 +40,4 @@ class Entity(Base):
 
     # Relationships
     type: Mapped[Type | None] = relationship(back_populates="entities")
-    object_links: Mapped[list[ObjectEntityLink]] = relationship(back_populates="entity")
+    observation_links: Mapped[list[ObservationEntityLink]] = relationship(back_populates="entity")

@@ -17,7 +17,7 @@ from object_sense.models.enums import TypeCreatedVia, TypeStatus
 
 if TYPE_CHECKING:
     from object_sense.models.entity import Entity
-    from object_sense.models.object import Object
+    from object_sense.models.observation import Observation
 
 
 class Type(Base):
@@ -50,5 +50,5 @@ class Type(Base):
     )
 
     # Relationships to other tables
-    objects: Mapped[list[Object]] = relationship(back_populates="primary_type")
+    observations: Mapped[list[Observation]] = relationship(back_populates="primary_type")
     entities: Mapped[list[Entity]] = relationship(back_populates="type")

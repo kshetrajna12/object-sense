@@ -1,12 +1,12 @@
 """CLI for ObjectSense.
 
 Commands:
-    ingest <path>       - Ingest files/directories
-    show-object <id>    - Show object details
-    show-type <name>    - Show type details
-    show-entity <id>    - Show entity details
-    review-types        - List all types in the system
-    search <query>      - Search objects by query
+    ingest <path>            - Ingest files/directories
+    show-observation <id>    - Show observation details
+    show-type <name>         - Show type details
+    show-entity <id>         - Show entity details
+    review-types             - List all types in the system
+    search <query>           - Search observations by query
 """
 
 from __future__ import annotations
@@ -32,8 +32,8 @@ from object_sense.models import (
     Entity,
     Evidence,
     EvidenceSource,
-    Object,
-    ObjectStatus,
+    Observation,
+    ObservationStatus,
     Signature,
     SubjectKind,
     Type,
@@ -93,7 +93,7 @@ async def get_or_create_type(session, type_name: str, created_via: TypeCreatedVi
 async def ingest_file(file_path: Path, verbose: bool = False) -> dict:
     """Ingest a single file through the full pipeline.
 
-    Returns dict with object_id, type, medium, and status.
+    Returns dict with observation_id, type, medium, and status.
     """
     # Read file content
     content = file_path.read_bytes()
@@ -106,20 +106,20 @@ async def ingest_file(file_path: Path, verbose: bool = False) -> dict:
         existing_blob = result.scalar_one_or_none()
 
         if existing_blob:
-            # Check if we already have an object for this blob + source
-            stmt = select(Object).where(
-                Object.blob_id == existing_blob.blob_id,
-                Object.source_id == str(file_path.absolute()),
+            # Check if we already have an observation for this blob + source
+            stmt = select(Observation).where(
+                Observation.blob_id == existing_blob.blob_id,
+                Observation.source_id == str(file_path.absolute()),
             )
             result = await session.execute(stmt)
-            existing_obj = result.scalar_one_or_none()
-            if existing_obj:
+            existing_obs = result.scalar_one_or_none()
+            if existing_obs:
                 return {
-                    "object_id": str(existing_obj.object_id),
-                    "type": existing_obj.primary_type_id,
-                    "medium": existing_obj.medium.value,
+                    "observation_id": str(existing_obs.observation_id),
+                    "type": existing_obs.primary_type_id,
+                    "medium": existing_obs.medium.value,
                     "status": "duplicate",
-                    "message": "Object already exists",
+                    "message": "Observation already exists",
                 }
 
         # Step 2: Medium probing
@@ -155,26 +155,26 @@ async def ingest_file(file_path: Path, verbose: bool = False) -> dict:
             )
             session.add(blob)
 
-        # Create object
-        object_id = uuid4()
+        # Create observation
+        observation_id = uuid4()
         # Convert SlotValue list to dict for JSONB storage
         slots_dict = {slot.name: slot.value for slot in type_proposal.slots}
-        obj = Object(
-            object_id=object_id,
+        obs = Observation(
+            observation_id=observation_id,
             medium=medium,
             primary_type_id=primary_type.type_id,
             source_id=str(file_path.absolute()),
             blob_id=blob.blob_id,
             slots=slots_dict,
-            status=ObjectStatus.ACTIVE,
+            status=ObservationStatus.ACTIVE,
         )
-        session.add(obj)
+        session.add(obs)
 
         # Store signatures
         if extraction_result.hash_value:
             sig = Signature(
                 signature_id=uuid4(),
-                object_id=object_id,
+                observation_id=observation_id,
                 signature_type=extraction_result.signature_type,
                 value=extraction_result.hash_value,
             )
@@ -184,7 +184,7 @@ async def ingest_file(file_path: Path, verbose: bool = False) -> dict:
         if extraction_result.text_embedding:
             sig = Signature(
                 signature_id=uuid4(),
-                object_id=object_id,
+                observation_id=observation_id,
                 signature_type="text_embedding",
                 text_embedding=extraction_result.text_embedding,
             )
@@ -193,7 +193,7 @@ async def ingest_file(file_path: Path, verbose: bool = False) -> dict:
         if extraction_result.image_embedding:
             sig = Signature(
                 signature_id=uuid4(),
-                object_id=object_id,
+                observation_id=observation_id,
                 signature_type="image_embedding",
                 image_embedding=extraction_result.image_embedding,
             )
@@ -202,8 +202,8 @@ async def ingest_file(file_path: Path, verbose: bool = False) -> dict:
         # Store evidence for type assignment
         evidence = Evidence(
             evidence_id=uuid4(),
-            subject_kind=SubjectKind.OBJECT,
-            subject_id=object_id,
+            subject_kind=SubjectKind.OBSERVATION,
+            subject_id=observation_id,
             predicate="has_type",
             target_id=primary_type.type_id,
             source=EvidenceSource.LLM,
@@ -221,7 +221,7 @@ async def ingest_file(file_path: Path, verbose: bool = False) -> dict:
         await session.commit()
 
         return {
-            "object_id": str(object_id),
+            "observation_id": str(observation_id),
             "type": type_proposal.primary_type,
             "medium": medium.value,
             "status": "ingested",
@@ -280,7 +280,7 @@ def ingest(
                     console.print(f"[green]OK[/green] → {result['type']}")
 
                 if verbose and result["status"] != "duplicate":
-                    console.print(f"    ID: {result['object_id']}")
+                    console.print(f"    ID: {result['observation_id']}")
                     console.print(f"    Medium: {result['medium']}")
                     if result.get("slots"):
                         console.print(f"    Slots: {result['slots']}")
@@ -300,93 +300,98 @@ def ingest(
     run_async(_ingest())
 
 
-@app.command("show-object")
-def show_object(
-    object_id: Annotated[str, typer.Argument(help="Object ID (full UUID or prefix)")],
+@app.command("show-observation")
+def show_observation(
+    observation_id: Annotated[str, typer.Argument(help="Observation ID (full UUID or prefix)")],
 ):
-    """Show details for a specific object."""
+    """Show details for a specific observation."""
     async def _show():
         await init_db()
         async with async_session_factory() as session:
             # Try exact UUID first, then prefix match
-            obj = None
+            obs = None
             try:
-                oid = UUID(object_id)
+                oid = UUID(observation_id)
                 stmt = (
-                    select(Object)
+                    select(Observation)
                     .options(
-                        selectinload(Object.primary_type),
-                        selectinload(Object.blob),
-                        selectinload(Object.entity_links),
-                        selectinload(Object.signatures),
+                        selectinload(Observation.primary_type),
+                        selectinload(Observation.blob),
+                        selectinload(Observation.entity_links),
+                        selectinload(Observation.signatures),
                     )
-                    .where(Object.object_id == oid)
+                    .where(Observation.observation_id == oid)
                 )
                 result = await session.execute(stmt)
-                obj = result.scalar_one_or_none()
+                obs = result.scalar_one_or_none()
             except ValueError:
                 # Not a valid UUID, try prefix match
                 pass
 
-            if not obj:
+            if not obs:
                 # Prefix match on UUID as text
-                from sqlalchemy import cast, String
+                from sqlalchemy import String, cast
                 stmt = (
-                    select(Object)
+                    select(Observation)
                     .options(
-                        selectinload(Object.primary_type),
-                        selectinload(Object.blob),
-                        selectinload(Object.entity_links),
-                        selectinload(Object.signatures),
+                        selectinload(Observation.primary_type),
+                        selectinload(Observation.blob),
+                        selectinload(Observation.entity_links),
+                        selectinload(Observation.signatures),
                     )
-                    .where(cast(Object.object_id, String).startswith(object_id))
+                    .where(cast(Observation.observation_id, String).startswith(observation_id))
                 )
                 result = await session.execute(stmt)
                 matches = result.scalars().all()
 
                 if len(matches) == 0:
-                    console.print(f"[red]Error:[/red] No object found matching: {object_id}")
+                    console.print(
+                        f"[red]Error:[/red] No observation found matching: {observation_id}"
+                    )
                     raise typer.Exit(1)
                 elif len(matches) > 1:
-                    console.print(f"[red]Error:[/red] Ambiguous prefix '{object_id}' matches {len(matches)} objects:")
+                    console.print(
+                        f"[red]Error:[/red] Ambiguous prefix '{observation_id}' "
+                        f"matches {len(matches)} observations:"
+                    )
                     for m in matches[:5]:
-                        console.print(f"  • {m.object_id}")
+                        console.print(f"  • {m.observation_id}")
                     raise typer.Exit(1)
-                obj = matches[0]
+                obs = matches[0]
 
-            if not obj:
-                console.print(f"[red]Error:[/red] Object not found: {object_id}")
+            if not obs:
+                console.print(f"[red]Error:[/red] Observation not found: {observation_id}")
                 raise typer.Exit(1)
 
             # Build display
             panel_content = []
-            panel_content.append(f"[bold]ID:[/bold] {obj.object_id}")
-            panel_content.append(f"[bold]Medium:[/bold] {obj.medium.value}")
-            panel_content.append(f"[bold]Status:[/bold] {obj.status.value}")
-            panel_content.append(f"[bold]Source:[/bold] {obj.source_id}")
+            panel_content.append(f"[bold]ID:[/bold] {obs.observation_id}")
+            panel_content.append(f"[bold]Medium:[/bold] {obs.medium.value}")
+            panel_content.append(f"[bold]Status:[/bold] {obs.status.value}")
+            panel_content.append(f"[bold]Source:[/bold] {obs.source_id}")
 
-            if obj.primary_type:
-                panel_content.append(f"[bold]Type:[/bold] {obj.primary_type.canonical_name}")
+            if obs.primary_type:
+                panel_content.append(f"[bold]Type:[/bold] {obs.primary_type.canonical_name}")
 
-            if obj.blob:
-                panel_content.append(f"[bold]SHA256:[/bold] {obj.blob.sha256[:16]}...")
-                panel_content.append(f"[bold]Size:[/bold] {obj.blob.size_bytes:,} bytes")
+            if obs.blob:
+                panel_content.append(f"[bold]SHA256:[/bold] {obs.blob.sha256[:16]}...")
+                panel_content.append(f"[bold]Size:[/bold] {obs.blob.size_bytes:,} bytes")
 
-            if obj.slots:
+            if obs.slots:
                 panel_content.append("[bold]Slots:[/bold]")
-                for k, v in obj.slots.items():
+                for k, v in obs.slots.items():
                     panel_content.append(f"  • {k}: {v}")
 
-            panel_content.append(f"[bold]Created:[/bold] {obj.created_at}")
+            panel_content.append(f"[bold]Created:[/bold] {obs.created_at}")
 
-            console.print(Panel("\n".join(panel_content), title="Object Details"))
+            console.print(Panel("\n".join(panel_content), title="Observation Details"))
 
             # Show signatures
-            if obj.signatures:
+            if obs.signatures:
                 table = Table(title="Signatures")
                 table.add_column("Type")
                 table.add_column("Value")
-                for sig in obj.signatures:
+                for sig in obs.signatures:
                     if sig.hash_value:
                         val = sig.hash_value
                     elif sig.text_embedding is not None:
@@ -415,7 +420,7 @@ def show_type(
         async with async_session_factory() as session:
             stmt = (
                 select(Type)
-                .options(selectinload(Type.objects), selectinload(Type.entities))
+                .options(selectinload(Type.observations), selectinload(Type.entities))
                 .where(Type.canonical_name == type_name)
             )
             result = await session.execute(stmt)
@@ -435,23 +440,23 @@ def show_type(
             if t.aliases:
                 panel_content.append(f"[bold]Aliases:[/bold] {', '.join(t.aliases)}")
 
-            panel_content.append(f"[bold]Objects:[/bold] {len(t.objects)}")
+            panel_content.append(f"[bold]Observations:[/bold] {len(t.observations)}")
             panel_content.append(f"[bold]Entities:[/bold] {len(t.entities)}")
             panel_content.append(f"[bold]Created:[/bold] {t.created_at}")
 
             console.print(Panel("\n".join(panel_content), title=f"Type: {type_name}"))
 
-            # Show recent objects of this type
-            if t.objects:
-                table = Table(title="Recent Objects")
+            # Show recent observations of this type
+            if t.observations:
+                table = Table(title="Recent Observations")
                 table.add_column("ID")
                 table.add_column("Medium")
                 table.add_column("Source")
-                for obj in t.objects[:5]:
-                    source = obj.source_id.split("/")[-1] if "/" in obj.source_id else obj.source_id
+                for obs in t.observations[:5]:
+                    source = obs.source_id.split("/")[-1] if "/" in obs.source_id else obs.source_id
                     table.add_row(
-                        str(obj.object_id)[:8] + "...",
-                        obj.medium.value,
+                        str(obs.observation_id)[:8] + "...",
+                        obs.medium.value,
                         source[:40] + "..." if len(source) > 40 else source,
                     )
                 console.print(table)
@@ -475,7 +480,7 @@ def show_entity(
         async with async_session_factory() as session:
             stmt = (
                 select(Entity)
-                .options(selectinload(Entity.type), selectinload(Entity.object_links))
+                .options(selectinload(Entity.type), selectinload(Entity.observation_links))
                 .where(Entity.entity_id == eid)
             )
             result = await session.execute(stmt)
@@ -498,7 +503,8 @@ def show_entity(
                 for k, v in entity.slots.items():
                     panel_content.append(f"  • {k}: {v}")
 
-            panel_content.append(f"[bold]Linked Objects:[/bold] {len(entity.object_links)}")
+            linked_count = len(entity.observation_links)
+            panel_content.append(f"[bold]Linked Observations:[/bold] {linked_count}")
             panel_content.append(f"[bold]Created:[/bold] {entity.created_at}")
 
             console.print(Panel("\n".join(panel_content), title="Entity Details"))
@@ -517,7 +523,7 @@ def review_types(
     async def _review():
         await init_db()
         async with async_session_factory() as session:
-            stmt = select(Type).options(selectinload(Type.objects))
+            stmt = select(Type).options(selectinload(Type.observations))
 
             if status:
                 try:
@@ -541,7 +547,7 @@ def review_types(
             table = Table(title="Types")
             table.add_column("Name", style="cyan")
             table.add_column("Status")
-            table.add_column("Objects", justify="right")
+            table.add_column("Observations", justify="right")
             table.add_column("Evidence", justify="right")
             table.add_column("Created Via")
 
@@ -556,7 +562,7 @@ def review_types(
                 table.add_row(
                     t.canonical_name,
                     f"[{status_style}]{t.status.value}[/{status_style}]",
-                    str(len(t.objects)),
+                    str(len(t.observations)),
                     str(t.evidence_count),
                     t.created_via.value,
                 )
@@ -578,7 +584,7 @@ def search(
     limit: Annotated[int, typer.Option(help="Maximum results")] = 10,
     full_ids: Annotated[bool, typer.Option("--full-ids", "-f", help="Show full UUIDs")] = False,
 ):
-    """Search objects by query.
+    """Search observations by query.
 
     Searches across source paths and slot values.
     """
@@ -589,16 +595,16 @@ def search(
             # In production, this would use vector similarity
             search_pattern = f"%{query}%"
             stmt = (
-                select(Object)
-                .options(selectinload(Object.primary_type))
-                .where(Object.source_id.ilike(search_pattern))
+                select(Observation)
+                .options(selectinload(Observation.primary_type))
+                .where(Observation.source_id.ilike(search_pattern))
                 .limit(limit)
             )
             result = await session.execute(stmt)
-            objects = result.scalars().all()
+            observations = result.scalars().all()
 
-            if not objects:
-                console.print(f"[yellow]No objects found matching '{query}'[/yellow]")
+            if not observations:
+                console.print(f"[yellow]No observations found matching '{query}'[/yellow]")
                 return
 
             table = Table(title=f"Search Results: '{query}'")
@@ -607,14 +613,17 @@ def search(
             table.add_column("Medium")
             table.add_column("Source")
 
-            for obj in objects:
-                source = obj.source_id.split("/")[-1] if "/" in obj.source_id else obj.source_id
-                type_name = obj.primary_type.canonical_name if obj.primary_type else "-"
-                obj_id = str(obj.object_id) if full_ids else str(obj.object_id)[:8] + "..."
+            for obs in observations:
+                source = obs.source_id.split("/")[-1] if "/" in obs.source_id else obs.source_id
+                type_name = obs.primary_type.canonical_name if obs.primary_type else "-"
+                if full_ids:
+                    obs_id = str(obs.observation_id)
+                else:
+                    obs_id = str(obs.observation_id)[:8] + "..."
                 table.add_row(
-                    obj_id,
+                    obs_id,
                     type_name,
-                    obj.medium.value,
+                    obs.medium.value,
                     source[:50] + "..." if len(source) > 50 else source,
                 )
 
@@ -629,10 +638,10 @@ def stats():
     async def _stats():
         await init_db()
         async with async_session_factory() as session:
-            # Count objects by medium
+            # Count observations by medium
             medium_stmt = (
-                select(Object.medium, func.count())
-                .group_by(Object.medium)
+                select(Observation.medium, func.count())
+                .group_by(Observation.medium)
             )
             medium_result = await session.execute(medium_stmt)
             medium_counts = dict(medium_result.all())
@@ -654,22 +663,22 @@ def stats():
             entity_counts = dict(entity_result.all())
 
             # Total counts
-            total_objects = sum(medium_counts.values())
+            total_observations = sum(medium_counts.values())
             total_types = sum(type_counts.values())
             total_entities = sum(entity_counts.values())
             total_blobs = (await session.execute(select(func.count()).select_from(Blob))).scalar()
 
             console.print(Panel(
-                f"[bold]Objects:[/bold] {total_objects}\n"
+                f"[bold]Observations:[/bold] {total_observations}\n"
                 f"[bold]Types:[/bold] {total_types}\n"
                 f"[bold]Entities:[/bold] {total_entities}\n"
                 f"[bold]Blobs:[/bold] {total_blobs}",
                 title="ObjectSense Statistics",
             ))
 
-            # Objects by medium
+            # Observations by medium
             if medium_counts:
-                table = Table(title="Objects by Medium")
+                table = Table(title="Observations by Medium")
                 table.add_column("Medium")
                 table.add_column("Count", justify="right")
                 for medium, count in sorted(medium_counts.items(), key=lambda x: -x[1]):

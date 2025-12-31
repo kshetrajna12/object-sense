@@ -7,14 +7,14 @@ from object_sense.models.enums import (
     EntityStatus,
     EvidenceSource,
     Medium,
-    ObjectStatus,
+    ObservationStatus,
     SubjectKind,
     TypeCreatedVia,
     TypeEvolutionKind,
     TypeStatus,
 )
 from object_sense.models.evidence import Evidence
-from object_sense.models.object import Object, ObjectEntityLink
+from object_sense.models.observation import Observation, ObservationEntityLink
 from object_sense.models.signature import Signature
 from object_sense.models.type import Type
 from object_sense.models.type_evolution import TypeEvolution
@@ -27,9 +27,9 @@ __all__ = [
     "Evidence",
     "EvidenceSource",
     "Medium",
-    "Object",
-    "ObjectEntityLink",
-    "ObjectStatus",
+    "Observation",
+    "ObservationEntityLink",
+    "ObservationStatus",
     "Signature",
     "SubjectKind",
     "Type",

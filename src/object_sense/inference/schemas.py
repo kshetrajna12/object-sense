@@ -138,10 +138,10 @@ class TypeSearchResult(BaseModel):
     status: str = "provisional"
 
 
-class SimilarObject(BaseModel):
-    """A similar object returned from similarity search."""
+class SimilarObservation(BaseModel):
+    """A similar observation returned from similarity search."""
 
-    object_id: str
+    observation_id: str
     primary_type: str | None
     similarity_score: float
     medium: str

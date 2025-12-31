@@ -9,7 +9,7 @@ import pytest
 from object_sense.extraction.base import ExtractionResult
 from object_sense.inference.schemas import (
     EntityHypothesis,
-    SimilarObject,
+    SimilarObservation,
     SlotValue,
     TypeProposal,
     TypeSearchResult,
@@ -154,29 +154,29 @@ class TestTypeSearchResult:
         assert result.evidence_count == 42
 
 
-class TestSimilarObject:
-    """Tests for SimilarObject schema."""
+class TestSimilarObservation:
+    """Tests for SimilarObservation schema."""
 
     def test_required_fields(self) -> None:
-        obj = SimilarObject(
-            object_id="abc-123",
+        obs = SimilarObservation(
+            observation_id="abc-123",
             primary_type="wildlife_photo",
             similarity_score=0.92,
             medium="image",
         )
-        assert obj.object_id == "abc-123"
-        assert obj.similarity_score == 0.92
+        assert obs.observation_id == "abc-123"
+        assert obs.similarity_score == 0.92
 
     def test_with_extracted_text(self) -> None:
-        obj = SimilarObject(
-            object_id="def-456",
+        obs = SimilarObservation(
+            observation_id="def-456",
             primary_type=None,
             similarity_score=0.75,
             medium="text",
             extracted_text="A leopard hunting at dusk",
         )
-        assert obj.primary_type is None
-        assert obj.extracted_text is not None
+        assert obs.primary_type is None
+        assert obs.extracted_text is not None
 
 
 class TestTypeInferenceDeps:

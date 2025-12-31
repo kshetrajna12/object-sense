@@ -22,7 +22,7 @@ from pydantic_ai.providers.openai import OpenAIProvider
 
 from object_sense.config import settings
 from object_sense.inference.schemas import (
-    SimilarObject,
+    SimilarObservation,
     TypeProposal,
     TypeSearchResult,
 )
@@ -188,27 +188,27 @@ def create_type_inference_agent() -> Agent[TypeInferenceDeps, TypeProposal]:
         return TypeSearchResult(**result)
 
     @agent.tool
-    async def find_similar_objects(  # pyright: ignore[reportUnusedFunction]
+    async def find_similar_observations(  # pyright: ignore[reportUnusedFunction]
         ctx: RunContext[TypeInferenceDeps],
         limit: int = 5,
-    ) -> list[SimilarObject]:
-        """Find objects similar to the current observation.
+    ) -> list[SimilarObservation]:
+        """Find observations similar to the current one.
 
         Use this to see how similar observations were typed.
         Helpful for consistency with existing type assignments.
 
         Args:
-            limit: Maximum number of similar objects to return
+            limit: Maximum number of similar observations to return
 
         Returns:
-            List of similar objects with their types and scores
+            List of similar observations with their types and scores
         """
         deps = ctx.deps
         if deps.find_similar_fn is None:
             return []
 
         results = await deps.find_similar_fn(limit=limit)
-        return [SimilarObject(**r) for r in results]
+        return [SimilarObservation(**r) for r in results]
 
     return agent
 
@@ -312,7 +312,7 @@ class TypeInferenceAgent:
         parts.append(
             "\n## Instructions\n"
             "1. First, use search_types to find existing types that might match\n"
-            "2. Use find_similar_objects to see how similar observations were typed\n"
+            "2. Use find_similar_observations to see how similar observations were typed\n"
             "3. Propose the most appropriate type, slots, and entity hypotheses\n"
         )
 

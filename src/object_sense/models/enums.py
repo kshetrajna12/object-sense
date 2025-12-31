@@ -14,8 +14,8 @@ class Medium(str, Enum):
     BINARY = "binary"
 
 
-class ObjectStatus(str, Enum):
-    """Lifecycle status of an Object."""
+class ObservationStatus(str, Enum):
+    """Lifecycle status of an Observation."""
 
     ACTIVE = "active"
     MERGED = "merged"
@@ -51,9 +51,9 @@ class EntityStatus(str, Enum):
 class SubjectKind(str, Enum):
     """What kind of thing the evidence is about."""
 
-    OBJECT = "object"
+    OBSERVATION = "observation"
     ENTITY = "entity"
-    OBJECT_ENTITY_LINK = "object_entity_link"
+    OBSERVATION_ENTITY_LINK = "observation_entity_link"
     ENTITY_MERGE = "entity_merge"
 
 

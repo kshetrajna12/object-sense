@@ -12,13 +12,13 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from object_sense.models.base import Base
 
 if TYPE_CHECKING:
-    from object_sense.models.object import Object
+    from object_sense.models.observation import Observation
 
 
 class Blob(Base):
     """Content-addressable blob storage for deduplication.
 
-    Blobs are identified by their SHA256 hash. Multiple Objects can
+    Blobs are identified by their SHA256 hash. Multiple Observations can
     reference the same Blob if they have identical content.
     """
 
@@ -31,4 +31,4 @@ class Blob(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     # Relationships
-    objects: Mapped[list[Object]] = relationship(back_populates="blob")
+    observations: Mapped[list[Observation]] = relationship(back_populates="blob")

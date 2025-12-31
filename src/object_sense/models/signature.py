@@ -15,7 +15,7 @@ from object_sense.config import settings
 from object_sense.models.base import Base
 
 if TYPE_CHECKING:
-    from object_sense.models.object import Object
+    from object_sense.models.observation import Observation
 
 
 class Signature(Base):
@@ -38,7 +38,9 @@ class Signature(Base):
     __tablename__ = "signatures"
 
     signature_id: Mapped[UUID] = mapped_column(primary_key=True)
-    object_id: Mapped[UUID] = mapped_column(ForeignKey("objects.object_id"), index=True)
+    observation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("observations.observation_id"), index=True
+    )
     signature_type: Mapped[str] = mapped_column(String(64), index=True)
     hash_value: Mapped[str | None] = mapped_column(String(256), index=True)
 
@@ -57,4 +59,4 @@ class Signature(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     # Relationships
-    object: Mapped[Object] = relationship(back_populates="signatures")
+    observation: Mapped[Observation] = relationship(back_populates="signatures")

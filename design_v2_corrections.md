@@ -1,6 +1,6 @@
 # Design v2 Corrections — Type Authority & Entity Resolution Clarifications
 
-> **Status:** DRAFT
+> **Status:** APPROVED
 > **Created:** 2025-12-28
 > **Supersedes:** concept_v1.md (preserves v1 for reference)
 
