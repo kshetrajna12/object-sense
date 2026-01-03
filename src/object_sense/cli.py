@@ -25,8 +25,12 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from object_sense.db import async_session_factory, engine, init_db
+from object_sense.extraction.base import ExtractedId
 from object_sense.extraction.orchestrator import ExtractionOrchestrator
+from object_sense.inference.schemas import DeterministicId, EntityHypothesis, TypeProposal
 from object_sense.inference.type_inference import TypeInferenceAgent
+from object_sense.models.signature import Signature
+from object_sense.resolution.resolver import EntityResolver
 from object_sense.models import (
     Blob,
     Entity,
@@ -71,6 +75,74 @@ def run_async(coro):
     return asyncio.run(coro)
 
 
+def _union_deterministic_ids(
+    extracted_ids: list[ExtractedId],
+    llm_ids: list[DeterministicId],
+) -> list[dict[str, str]]:
+    """Union deterministic IDs from extraction and LLM, with deduplication.
+
+    Returns a list of dicts suitable for JSONB storage on observation.
+    Deduplicates by (id_type, id_value, id_namespace) tuple.
+    """
+    seen: set[tuple[str, str, str]] = set()
+    result: list[dict[str, str]] = []
+
+    # Add extracted IDs first (they're the reliable baseline)
+    for eid in extracted_ids:
+        key = (eid.id_type, eid.id_value, eid.id_namespace)
+        if key not in seen:
+            seen.add(key)
+            result.append({
+                "id_type": eid.id_type,
+                "id_value": eid.id_value,
+                "id_namespace": eid.id_namespace,
+            })
+
+    # Add LLM IDs (may supplement with additional IDs)
+    for lid in llm_ids:
+        # Normalize namespace - never allow null/empty
+        namespace = lid.id_namespace if lid.id_namespace else "llm"
+        key = (lid.id_type, lid.id_value, namespace)
+        if key not in seen:
+            seen.add(key)
+            result.append({
+                "id_type": lid.id_type,
+                "id_value": lid.id_value,
+                "id_namespace": namespace,
+            })
+
+    return result
+
+
+def _extracted_to_entity_hypothesis(extracted_ids: list[ExtractedId]) -> list[EntityHypothesis]:
+    """Convert extracted deterministic IDs to minimal entity hypotheses.
+
+    Used when Step 4 (LLM) fails but we have extracted IDs to resolve.
+    Creates one hypothesis per ID with deterministic linking.
+    """
+    from object_sense.models.enums import EntityNature
+
+    hypotheses: list[EntityHypothesis] = []
+    for eid in extracted_ids:
+        # Convert ExtractedId to DeterministicId for the hypothesis
+        det_id = DeterministicId(
+            id_type=eid.id_type,
+            id_value=eid.id_value,
+            id_namespace=eid.id_namespace,
+            strength="strong" if eid.strength == "strong" else "weak",
+        )
+        hyp = EntityHypothesis(
+            entity_type=f"{eid.id_type}_entity",
+            entity_nature=EntityNature.INDIVIDUAL,
+            suggested_name=f"{eid.id_type}:{eid.id_value}",
+            deterministic_ids=[det_id],
+            confidence=1.0,  # Deterministic IDs are high confidence
+            reasoning=f"Entity anchored by extracted {eid.id_type}",
+        )
+        hypotheses.append(hyp)
+    return hypotheses
+
+
 async def get_or_create_type(session, type_name: str, created_via: TypeCreatedVia) -> Type:
     """Get existing type or create new one."""
     stmt = select(Type).where(Type.canonical_name == type_name)
@@ -94,8 +166,21 @@ async def get_or_create_type(session, type_name: str, created_via: TypeCreatedVi
 async def ingest_file(file_path: Path, verbose: bool = False) -> dict:
     """Ingest a single file through the full pipeline.
 
+    Pipeline:
+    1. Blob dedup check
+    2. Medium probing
+    3. Feature extraction (produces deterministic_ids from content)
+    4. Type inference (LLM - may fail, but pipeline continues)
+    5. Entity resolution (uses extracted + LLM deterministic_ids)
+
+    All writes occur in a single transaction - rollback leaves zero side-effects.
+
     Returns dict with observation_id, type, medium, and status.
     """
+    import logging
+
+    logger = logging.getLogger(__name__)
+
     # Read file content
     content = file_path.read_bytes()
     sha256 = hashlib.sha256(content).hexdigest()
@@ -126,26 +211,33 @@ async def ingest_file(file_path: Path, verbose: bool = False) -> dict:
         # Step 2: Medium probing
         medium = probe_medium(content, filename=file_path.name)
 
-        # Step 3: Feature extraction
+        # Step 3: Feature extraction (produces deterministic_ids from content)
         orchestrator = ExtractionOrchestrator()
         extraction_result = await orchestrator.extract(
             content, medium=medium, filename=file_path.name
         )
 
-        # Step 4: Type inference
-        inference_agent = TypeInferenceAgent()
-        type_proposal = await inference_agent.infer(extraction_result, medium=medium.value)
+        # Step 4: Type inference (LLM) - may fail, but pipeline continues
+        type_proposal: TypeProposal | None = None
+        llm_failed = False
+        try:
+            inference_agent = TypeInferenceAgent()
+            type_proposal = await inference_agent.infer(extraction_result, medium=medium.value)
+        except Exception as e:
+            llm_failed = True
+            logger.warning("Step 4 (LLM type inference) failed: %s", e)
 
         # Step 4B: Engine resolves type candidate (LLM proposes, engine decides)
-        # The LLM outputs a type_candidate proposal. The engine handles dedup/matching
-        # via normalize_type_name() and find_similar_candidates().
         type_candidate_service = TypeCandidateService(session)
         type_candidate = None
-        type_name = None
+        type_name: str | None = None
+        observation_kind = "unknown"
+        facets: dict[str, object] = {}
+        reasoning = ""
 
-        if type_proposal.type_candidate:
+        if type_proposal and type_proposal.type_candidate:
             # Engine creates or matches a TypeCandidate (dedup via normalized name)
-            type_candidate, is_new = await type_candidate_service.get_or_create(
+            type_candidate, _is_new = await type_candidate_service.get_or_create(
                 type_proposal.type_candidate.proposed_name,
                 details={
                     "rationale": type_proposal.type_candidate.rationale,
@@ -154,9 +246,22 @@ async def ingest_file(file_path: Path, verbose: bool = False) -> dict:
                 },
             )
             type_name = type_candidate.proposed_name
-        else:
-            # Rare: no type proposal. Use observation_kind as fallback label.
+            observation_kind = type_proposal.observation_kind
+            facets = type_proposal.facets
+            reasoning = type_proposal.reasoning
+        elif type_proposal:
+            # Type proposal exists but no type_candidate - use observation_kind
             type_name = type_proposal.observation_kind
+            observation_kind = type_proposal.observation_kind
+            facets = type_proposal.facets
+            reasoning = type_proposal.reasoning
+
+        # Union deterministic_ids from extraction + LLM (dedupe by tuple)
+        llm_det_ids = type_proposal.deterministic_ids if type_proposal else []
+        deterministic_ids = _union_deterministic_ids(
+            extraction_result.deterministic_ids,
+            llm_det_ids,
+        )
 
         # Create blob if needed
         if existing_blob:
@@ -172,11 +277,6 @@ async def ingest_file(file_path: Path, verbose: bool = False) -> dict:
 
         # Create observation
         observation_id = uuid4()
-        # Convert deterministic_ids to JSONB-compatible format
-        deterministic_ids = [
-            {"id_type": d.id_type, "id_value": d.id_value, "id_namespace": d.id_namespace}
-            for d in type_proposal.deterministic_ids
-        ]
         obs = Observation(
             observation_id=observation_id,
             medium=medium,
@@ -187,24 +287,26 @@ async def ingest_file(file_path: Path, verbose: bool = False) -> dict:
             source_id=str(file_path.absolute()),
             blob_id=blob.blob_id,
             slots={},  # Slots are now per-entity in entity_seeds
-            observation_kind=type_proposal.observation_kind,  # Routing hint
-            facets=type_proposal.facets,  # Extracted attributes
-            deterministic_ids=deterministic_ids,
+            observation_kind=observation_kind,  # Routing hint
+            facets=facets,  # Extracted attributes
+            deterministic_ids=deterministic_ids,  # Union of extracted + LLM
             status=ObservationStatus.ACTIVE,
         )
         session.add(obs)
 
-        # Store signatures
+        # Store signatures and collect for resolver
+        signatures_created: list[Signature] = []
+
         if extraction_result.hash_value:
-            sig = Signature(
+            hash_sig = Signature(
                 signature_id=uuid4(),
                 observation_id=observation_id,
                 signature_type=extraction_result.signature_type,
-                value=extraction_result.hash_value,
+                hash_value=extraction_result.hash_value,
             )
-            session.add(sig)
+            session.add(hash_sig)
+            signatures_created.append(hash_sig)
 
-        # Store embeddings as signatures
         if extraction_result.text_embedding:
             sig = Signature(
                 signature_id=uuid4(),
@@ -213,6 +315,7 @@ async def ingest_file(file_path: Path, verbose: bool = False) -> dict:
                 text_embedding=extraction_result.text_embedding,
             )
             session.add(sig)
+            signatures_created.append(sig)
 
         if extraction_result.image_embedding:
             sig = Signature(
@@ -222,11 +325,10 @@ async def ingest_file(file_path: Path, verbose: bool = False) -> dict:
                 image_embedding=extraction_result.image_embedding,
             )
             session.add(sig)
+            signatures_created.append(sig)
 
         # Store evidence for type candidate assignment
-        # Note: Evidence points to TypeCandidate, not stable Type.
-        # The LLM proposed a label; the engine created/matched a candidate.
-        if type_candidate:
+        if type_candidate and type_proposal and type_proposal.type_candidate:
             evidence = Evidence(
                 evidence_id=uuid4(),
                 subject_kind=SubjectKind.OBSERVATION,
@@ -234,26 +336,61 @@ async def ingest_file(file_path: Path, verbose: bool = False) -> dict:
                 predicate="has_type_candidate",
                 target_id=type_candidate.candidate_id,
                 source=EvidenceSource.LLM,
-                score=type_proposal.type_candidate.confidence if type_proposal.type_candidate else 0.8,
+                score=type_proposal.type_candidate.confidence,
                 details={
-                    "reasoning": type_proposal.reasoning,
+                    "reasoning": reasoning,
                     "proposed_name": type_candidate.proposed_name,
                     "normalized_name": type_candidate.normalized_name,
                 },
             )
             session.add(evidence)
 
+        # Flush to ensure observation and signatures have IDs before resolver
+        await session.flush()
+
+        # Step 5: Entity resolution
+        # Determine entity_seeds: from LLM if available, else from extracted IDs
+        entity_seeds: list[EntityHypothesis] = []
+        if type_proposal and type_proposal.entity_seeds:
+            entity_seeds = type_proposal.entity_seeds
+        elif extraction_result.deterministic_ids:
+            # LLM failed but we have extracted IDs - create minimal hypotheses
+            entity_seeds = _extracted_to_entity_hypothesis(extraction_result.deterministic_ids)
+
+        resolution_result = None
+        entities_created = 0
+        links_created = 0
+
+        if entity_seeds:
+            resolver = EntityResolver(session)
+            resolution_result = await resolver.resolve(
+                observation=obs,
+                signatures=signatures_created,
+                entity_seeds=entity_seeds,
+            )
+            entities_created = len(resolution_result.entities_created)
+            links_created = len(resolution_result.links)
+
+        # Single commit for entire transaction
         await session.commit()
 
-        return {
+        result_dict = {
             "observation_id": str(observation_id),
-            "type_candidate": type_name,  # Note: this is a candidate, not stable type
-            "type_status": "candidate",  # Explicitly mark as tentative
+            "type_candidate": type_name,
+            "type_status": "candidate" if type_candidate else "unknown",
             "medium": medium.value,
             "status": "ingested",
-            "facets": type_proposal.facets,
-            "reasoning": type_proposal.reasoning,
+            "facets": facets,
+            "reasoning": reasoning,
+            "entities_created": entities_created,
+            "links_created": links_created,
         }
+
+        if llm_failed:
+            result_dict["llm_failed"] = True
+            result_dict["fallback_resolution"] = bool(extraction_result.deterministic_ids)
+
+        return result_dict
 
 
 @app.command()
@@ -268,7 +405,7 @@ def ingest(
 ):
     """Ingest files into ObjectSense.
 
-    Runs the full pipeline: probe medium → extract features → infer type → store.
+    Runs the full pipeline: probe medium → extract features → infer type → resolve entities.
     """
     async def _ingest():
         # Initialize database
@@ -303,7 +440,11 @@ def ingest(
                 if result["status"] == "duplicate":
                     console.print("[yellow]SKIP[/yellow] (duplicate)")
                 else:
-                    console.print(f"[green]OK[/green] → {result['type']}")
+                    type_display = result.get("type_candidate") or "unknown"
+                    entity_info = ""
+                    if result.get("entities_created", 0) > 0:
+                        entity_info = f" (+{result['entities_created']} entities)"
+                    console.print(f"[green]OK[/green] → {type_display}{entity_info}")
 
                 if verbose and result["status"] != "duplicate":
                     console.print(f"    ID: {result['observation_id']}")

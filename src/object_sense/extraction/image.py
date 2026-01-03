@@ -3,6 +3,7 @@
 Handles:
 - CAN_EMBED_IMAGE: CLIP visual embeddings
 - CAN_EXTRACT_EXIF: EXIF metadata extraction
+- Deterministic ID extraction from GPS coordinates
 - CAN_CAPTION: Image captioning (via VLM) - deferred to LLM integration phase
 
 Supports standard image formats (JPEG, PNG, WebP, etc.) and RAW formats
@@ -16,7 +17,10 @@ from pathlib import Path
 from typing import Any
 
 from object_sense.clients.embeddings import EmbeddingClient
-from object_sense.extraction.base import ExtractionResult
+from object_sense.extraction.base import ExtractedId, ExtractionResult
+
+# GPS coordinate precision for deterministic ID (6 decimal places = ~0.1m accuracy)
+GPS_PRECISION = 6
 
 # RAW file extensions that need rawpy processing
 RAW_EXTENSIONS = frozenset({
@@ -39,6 +43,7 @@ class ImageExtractor:
 
     Features extracted:
     - image_embedding: CLIP visual embedding (768-dim)
+    - deterministic_ids: GPS coordinates as (gps, "lat,lon", wgs84) if available
     - extra.exif: EXIF metadata if available
     - extra.width/height: Image dimensions
 
@@ -58,7 +63,7 @@ class ImageExtractor:
             filename: Optional filename (used to detect RAW formats)
 
         Returns:
-            ExtractionResult with image_embedding and EXIF metadata
+            ExtractionResult with image_embedding, EXIF metadata, and GPS deterministic ID
         """
         result = ExtractionResult(signature_type="image")
 
@@ -89,11 +94,42 @@ class ImageExtractor:
             exif_data, dimensions = self._extract_metadata(data)
             if exif_data:
                 result.extra["exif"] = exif_data
+
+                # Extract GPS as deterministic ID if available
+                gps_id = self._extract_gps_id(exif_data)
+                if gps_id:
+                    result.deterministic_ids.append(gps_id)
+
             if dimensions:
                 result.extra["width"] = dimensions[0]
                 result.extra["height"] = dimensions[1]
 
         return result
+
+    def _extract_gps_id(self, exif_data: dict[str, Any]) -> ExtractedId | None:
+        """Extract GPS coordinates as a deterministic ID.
+
+        Args:
+            exif_data: Extracted EXIF data with latitude/longitude
+
+        Returns:
+            ExtractedId with (gps, "lat,lon", wgs84) or None if no GPS
+        """
+        lat = exif_data.get("latitude")
+        lon = exif_data.get("longitude")
+
+        if lat is None or lon is None:
+            return None
+
+        # Format as "lat,lon" with fixed precision
+        gps_value = f"{lat:.{GPS_PRECISION}f},{lon:.{GPS_PRECISION}f}"
+
+        return ExtractedId(
+            id_type="gps",
+            id_value=gps_value,
+            id_namespace="wgs84",
+            strength="strong",
+        )
 
     def _extract_raw_thumbnail(
         self, data: bytes

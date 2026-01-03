@@ -4,6 +4,7 @@ Handles:
 - CAN_PARSE_KEYS: Extract and analyze JSON structure
 - CAN_INFER_SCHEMA: Generate schema hash for identity
 - CAN_EMBED_TEXT: Embed JSON content as text
+- Deterministic ID extraction from known ID fields
 """
 
 from __future__ import annotations
@@ -13,7 +14,46 @@ import json
 from typing import Any
 
 from object_sense.clients.embeddings import EmbeddingClient
-from object_sense.extraction.base import ExtractionResult
+from object_sense.extraction.base import ExtractedId, ExtractionResult
+
+# Allowlist of keys that are treated as deterministic identifiers.
+# These are extracted as (id_type, id_value, namespace) tuples.
+# Keys are matched case-insensitively.
+ID_KEY_ALLOWLIST: frozenset[str] = frozenset({
+    # Product identifiers
+    "sku",
+    "product_id",
+    "productid",
+    "item_id",
+    "itemid",
+    "upc",
+    "ean",
+    "gtin",
+    "asin",
+    "isbn",
+    # Order/transaction identifiers
+    "order_id",
+    "orderid",
+    "booking_id",
+    "bookingid",
+    "trip_id",
+    "tripid",
+    "reservation_id",
+    "reservationid",
+    "transaction_id",
+    "transactionid",
+    "invoice_id",
+    "invoiceid",
+    # Generic identifiers
+    "id",
+    "uuid",
+    "guid",
+    "external_id",
+    "externalid",
+    "ref",
+    "reference",
+    "code",
+})
 
 
 class JsonExtractor:
@@ -23,13 +63,20 @@ class JsonExtractor:
     - text_embedding: BGE embedding of JSON-as-text (1024-dim)
     - hash_value: Schema hash (structure fingerprint)
     - extracted_text: Flattened key-value pairs as text
+    - deterministic_ids: IDs from allowlisted keys (sku, product_id, etc.)
     - extra.schema: Inferred schema structure
     - extra.key_count: Number of keys
     - extra.is_array: Whether root is array
     """
 
-    def __init__(self, embedding_client: EmbeddingClient | None = None) -> None:
+    def __init__(
+        self,
+        embedding_client: EmbeddingClient | None = None,
+        *,
+        id_namespace: str = "json",
+    ) -> None:
         self._client = embedding_client or EmbeddingClient()
+        self._id_namespace = id_namespace
 
     async def extract(self, data: bytes, *, filename: str | None = None) -> ExtractionResult:
         """Extract features from JSON bytes.
@@ -39,7 +86,7 @@ class JsonExtractor:
             filename: Optional filename (unused)
 
         Returns:
-            ExtractionResult with schema hash and text embedding
+            ExtractionResult with schema hash, text embedding, and deterministic IDs
         """
         result = ExtractionResult(signature_type="json")
 
@@ -66,6 +113,9 @@ class JsonExtractor:
         elif isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
             result.extra["key_count"] = len(parsed[0])
 
+        # Extract deterministic IDs from allowlisted keys
+        result.deterministic_ids = self._extract_deterministic_ids(parsed)
+
         # Convert to text for embedding
         text_repr = self._to_text(parsed)
         if text_repr:
@@ -77,6 +127,84 @@ class JsonExtractor:
                 result.text_embedding = embeddings[0]
 
         return result
+
+    def _extract_deterministic_ids(self, obj: Any) -> list[ExtractedId]:
+        """Extract deterministic IDs from JSON using allowlisted keys.
+
+        Scans the JSON structure for keys in ID_KEY_ALLOWLIST and extracts
+        their values as deterministic identifiers.
+
+        Args:
+            obj: Parsed JSON object (dict, list, or primitive)
+
+        Returns:
+            List of ExtractedId with normalized values
+        """
+        ids: list[ExtractedId] = []
+        seen: set[tuple[str, str, str]] = set()  # Dedup within same document
+
+        self._scan_for_ids(obj, ids, seen)
+        return ids
+
+    def _scan_for_ids(
+        self,
+        obj: Any,
+        ids: list[ExtractedId],
+        seen: set[tuple[str, str, str]],
+        max_depth: int = 10,
+    ) -> None:
+        """Recursively scan JSON for ID fields."""
+        if max_depth <= 0:
+            return
+
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                key_lower = key.lower()
+                # Check if this key is in our allowlist
+                if key_lower in ID_KEY_ALLOWLIST:
+                    # Extract the ID value
+                    id_value = self._normalize_id_value(value)
+                    if id_value:
+                        # Normalize key to canonical form (lowercase, underscores)
+                        id_type = key_lower.replace("-", "_")
+                        id_tuple = (id_type, id_value, self._id_namespace)
+                        if id_tuple not in seen:
+                            seen.add(id_tuple)
+                            ids.append(ExtractedId(
+                                id_type=id_type,
+                                id_value=id_value,
+                                id_namespace=self._id_namespace,
+                                strength="strong",
+                            ))
+                else:
+                    # Recurse into nested structures
+                    self._scan_for_ids(value, ids, seen, max_depth - 1)
+
+        elif isinstance(obj, list):
+            for item in obj[:100]:  # Limit to first 100 items
+                self._scan_for_ids(item, ids, seen, max_depth - 1)
+
+    def _normalize_id_value(self, value: Any) -> str | None:
+        """Normalize an ID value to string, or None if invalid.
+
+        Only accepts non-empty strings, integers, and UUIDs.
+        Rejects floats, booleans, None, and complex objects.
+        """
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return None  # Booleans are not valid IDs
+        if isinstance(value, int):
+            return str(value)
+        if isinstance(value, float):
+            return None  # Floats are not valid IDs (precision issues)
+        if isinstance(value, str):
+            normalized = value.strip()
+            if normalized:
+                return normalized
+            return None
+        # Complex objects (dict, list) are not valid ID values
+        return None
 
     def _infer_schema(self, obj: Any, max_depth: int = 5) -> dict[str, Any]:
         """Infer a type schema from JSON object.
