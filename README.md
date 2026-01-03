@@ -1,13 +1,72 @@
 # Object Sense Engine
 
-A semantic substrate that provides persistent object identity and type awareness beneath all other AI systems.
+A semantic substrate that provides persistent object identity and type awareness for AI applications and pipelines.
 
 Object Sense answers three fundamental questions:
 - **"Is this the same thing I saw before?"** — identity resolution
-- **"What kind of thing is this?"** — type inference
+- **"What kind of thing is this?"** — type proposal & stabilization
 - **"What things exist and how are they related?"** — world model
 
-This is not a file classifier, a RAG pattern, or a hand-crafted taxonomy. It is a self-organizing world model.
+## Why This Exists
+
+Modern AI systems repeatedly rediscover the same facts because they lack persistent identity. Every pipeline re-solves "is this the same thing?" — the same product matched across catalogs, the same entity extracted from different documents, the same object recognized in different photos.
+
+Object Sense solves that once, centrally, across media and domains. It incrementally builds a coherent model of the world from evidence, without predefined schemas.
+
+**What makes it different:**
+- One identity layer shared by many apps and pipelines
+- Deterministic IDs are law — create-on-miss, never overridden by similarity
+- LLM proposes, engine decides
+- Cross-medium by design (image, text, json, video)
+
+## Status
+
+Early but functional. Expect rapid iteration on APIs and heuristics; invariants (deterministic IDs, engine-decides, canonical merges) are stable.
+
+## Quick Start
+
+```bash
+# Install
+git clone https://github.com/object-sense/object-sense.git
+cd object-sense
+uv sync
+
+# Start database and initialize
+uv run object-sense setup
+
+# Ingest some files
+uv run object-sense ingest photo.jpg
+uv run object-sense ingest ./products/*.json --id-namespace "source:catalog"
+
+# See what was created
+uv run object-sense stats
+uv run object-sense search "leopard"
+```
+
+```
+$ uv run object-sense stats
+╭─────────────── ObjectSense Statistics ───────────────╮
+│ Observations: 47                                     │
+│ Types: 8                                             │
+│ Entities: 12                                         │
+│ Blobs: 45                                            │
+╰──────────────────────────────────────────────────────╯
+
+$ uv run object-sense search "leopard"
+┏━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━┓
+┃ ID          ┃ Type            ┃ Medium ┃ Source               ┃
+┡━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━┩
+│ 3f8a2b1c... │ wildlife_photo  │ image  │ leopard_rock.jpg     │
+│ 7d9e4f2a... │ wildlife_photo  │ image  │ marula_leopard.cr3   │
+└─────────────┴─────────────────┴────────┴──────────────────────┘
+```
+
+After ingestion, the system has:
+- Created observations for each file
+- Extracted embeddings, signatures, and deterministic IDs
+- Proposed type candidates via LLM (engine decides stable types)
+- Resolved entities (or created new ones)
+- Linked observations to entities with confidence scores
 
 ## Core Concepts
 
@@ -31,30 +90,24 @@ A product can arrive as JSON, HTML, image, or video — it's still conceptually 
 
 Observations are **inputs**. Entities are **outputs**. Multiple observations can link to the same entity (same leopard photographed across sessions).
 
-### The Emergence Order
-
-```
-Observation → Entity → Type → Domain
-```
-
-Types crystallize from entity patterns — they are effects, not causes. Domains emerge as dense regions of the type/entity graph — never explicitly defined.
-
 ## How It Works
 
 ```
 1. INGEST           → Assign UUID, compute SHA256, blob dedup
 2. MEDIUM PROBING   → Detect format (image/text/json/video/audio)
 3. EXTRACTION       → Run medium-specific extractors (embeddings, EXIF, NER, schema)
-4. TYPE INFERENCE   → LLM proposes observation_kind + type + entity_seeds
+4. TYPE INFERENCE   → LLM proposes observation_kind + type candidate + entity seeds
 5. ENTITY RESOLUTION→ Resolve to existing entities or create new ones
 6. STORE & INDEX    → Persist observation, entities, evidence, update indexes
 ```
+
+The engine decides stable types — LLM proposals are evidence, not authority.
 
 ### Entity Resolution
 
 Identity resolution uses a priority-based approach:
 
-1. **Deterministic IDs** (highest priority): SKU, product_id, GPS coords, trip_id
+1. **Deterministic IDs** (highest priority): SKU, product_id, GTIN/UPC, file hash, canonical URL — hard identifiers always override similarity signals
 2. **Similarity search**: Multi-signal scoring weighted by entity nature
 
 | Entity Nature | Primary Signals |
@@ -64,10 +117,18 @@ Identity resolution uses a priority-based approach:
 | `group` | Member overlap, location, temporal proximity |
 | `event` | Timestamp, participants, location, duration |
 
-Thresholds control linking decisions:
-- **T_link** (0.85): High confidence → link to existing entity
-- **T_new** (0.60): Below this → create new proto-entity
-- **T_margin** (0.10): Ambiguous margin → flag for review
+Configurable thresholds control linking decisions: when to link to existing entities, when to create new ones, and when to flag ambiguous cases for review.
+
+## Non-goals
+
+- **Not a classifier** — it doesn't categorize files into buckets
+- **Not a taxonomy authoring tool** — types emerge from data, not configuration
+- **Not a business rules engine** — it maintains identity, not policy
+- **Not a replacement for domain logic** — it's infrastructure beneath your application
+
+Object Sense is a substrate. It tells you *what things are* so your application can decide *what to do with them*.
+
+Object Sense is not a general-purpose knowledge graph; it is an identity-first semantic engine optimized for evidence-backed resolution.
 
 ## Installation
 
@@ -77,31 +138,17 @@ Thresholds control linking decisions:
 - Docker (for PostgreSQL with pgvector)
 - [uv](https://docs.astral.sh/uv/) package manager
 
-### Setup
-
-```bash
-# Clone the repository
-git clone https://github.com/object-sense/object-sense.git
-cd object-sense
-
-# Install dependencies
-uv sync
-
-# Start PostgreSQL and initialize schema
-uv run object-sense setup
-```
-
-This starts a PostgreSQL container with pgvector and creates all tables.
+For standard setup, follow [Quick Start](#quick-start).
 
 ### Manual Setup
 
-If you prefer manual control:
+If you prefer manual control over the database:
 
 ```bash
-# Start database
+# Start database only
 docker compose up -d
 
-# Initialize schema only
+# Initialize schema
 uv run object-sense init-world
 ```
 
@@ -223,6 +270,14 @@ BLOB                 OBSERVATION              TYPE_CANDIDATE          TYPE
 
 5. **Types Are Non-Authoritative**: Types improve retrieval and UX but cannot hard-gate identity decisions.
 
+### The Emergence Order
+
+Types crystallize from entity patterns — they are effects, not causes:
+
+```
+Observation → Entity → Type → Domain
+```
+
 ## Development
 
 ### Running Tests
@@ -291,12 +346,15 @@ Environment variables (or `.env` file):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DATABASE_URL` | `postgresql+asyncpg://...` | PostgreSQL connection |
-| `LLM_BASE_URL` | `http://localhost:8000/v1` | LLM gateway endpoint |
-| `MODEL_CHAT` | `qwen3-vl-4b` | Vision/chat model |
-| `MODEL_REASONING` | `gpt-oss-20b` | Reasoning model |
-| `ENTITY_RESOLUTION_T_LINK` | `0.85` | Link threshold |
-| `ENTITY_RESOLUTION_T_NEW` | `0.60` | New entity threshold |
+| `DATABASE_URL` | `postgresql+asyncpg://...localhost.../object_sense` | PostgreSQL connection string |
+| `LLM_BASE_URL` | `http://localhost:8000/v1` | OpenAI-compatible LLM gateway |
+| `MODEL_CHAT` | `qwen3-vl-4b` | Vision/chat model for type inference |
+| `MODEL_TEXT_EMBEDDING` | `bge-large` | Text embedding model |
+| `MODEL_IMAGE_EMBEDDING` | `clip-vit` | Image embedding model |
+
+**Note:** Blob content is stored in PostgreSQL; the `storage_path` column records the original file path for reference.
+
+See `src/object_sense/config.py` for all options including entity resolution thresholds and type promotion settings.
 
 ## Documentation
 
@@ -306,4 +364,4 @@ Environment variables (or `.env` file):
 
 ## License
 
-[Add license information]
+TBD
