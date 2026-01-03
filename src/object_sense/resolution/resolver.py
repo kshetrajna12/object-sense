@@ -53,6 +53,7 @@ from object_sense.resolution.reconciliation import (
     reconcile_multi_seed_links,
 )
 from object_sense.resolution.similarity import ObservationSignals, SimilarityScorer
+from object_sense.utils.slots import normalize_slots
 
 if TYPE_CHECKING:
     from object_sense.inference.schemas import DeterministicId, EntityHypothesis
@@ -676,11 +677,19 @@ class EntityResolver:
         Returns:
             Newly created Entity.
         """
+        # Normalize slots per Slot Hygiene Contract (concept_v2.md §6.3)
+        raw_slots = _slots_to_dict(seed)
+        normalized_slots, slot_warnings = normalize_slots(raw_slots)
+
+        # Log warnings (v0: warn but don't block)
+        for warning in slot_warnings:
+            logger.warning("Entity slot hygiene: %s", warning)
+
         entity = Entity(
             entity_id=uuid4(),
             entity_nature=entity_nature,
             name=seed.suggested_name,
-            slots=_slots_to_dict(seed),
+            slots=normalized_slots,
             status=EntityStatus.PROTO,
             confidence=seed.confidence,
             prototype_count=0,

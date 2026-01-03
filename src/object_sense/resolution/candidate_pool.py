@@ -13,6 +13,7 @@ See design_v2_corrections.md §5 and §6 for specifications.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -24,9 +25,12 @@ from object_sense.config import settings
 from object_sense.models.entity import Entity
 from object_sense.models.entity_deterministic_id import EntityDeterministicId
 from object_sense.models.enums import EntityNature, EntityStatus
+from object_sense.utils.slots import normalize_slots
 
 if TYPE_CHECKING:
     from object_sense.inference.schemas import DeterministicId
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -234,12 +238,20 @@ class CandidatePoolService:
 
         entity_id = uuid4()
 
+        # Normalize slots per Slot Hygiene Contract (concept_v2.md §6.3)
+        raw_slots = slots or {}
+        normalized_slots, slot_warnings = normalize_slots(raw_slots)
+
+        # Log warnings (v0: warn but don't block)
+        for warning in slot_warnings:
+            logger.warning("Entity slot hygiene: %s", warning)
+
         # Create the entity
         entity = Entity(
             entity_id=entity_id,
             entity_nature=entity_nature,
             name=name,
-            slots=slots or {},
+            slots=normalized_slots,
             status=EntityStatus.PROTO,
             confidence=1.0,  # High confidence from deterministic ID
             prototype_count=0,
