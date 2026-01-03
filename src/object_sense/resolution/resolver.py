@@ -20,6 +20,9 @@ Algorithm overview:
 4. Prototype update (running average)
 
 5. Return links for persistence
+
+Utility functions:
+- resolve_canonical_entity: Follow canonical_entity_id chain with path compression
 """
 
 from __future__ import annotations
@@ -27,7 +30,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -57,6 +60,9 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+# Algorithm version for audit trail
+ALGORITHM_VERSION = "resolver-v1.0"
 
 
 def _slots_to_dict(seed: EntityHypothesis) -> dict[str, Any]:
@@ -225,6 +231,7 @@ class EntityResolver:
                 entity_id=link.entity_id,
                 kind=EntityEvolutionKind.LINK,
                 observation_id=observation.observation_id,
+                algorithm_version=ALGORITHM_VERSION,
                 match_score=link.posterior,
                 threshold_used=self._t_link,
                 signals_used={},  # Could capture signal breakdown
@@ -363,6 +370,7 @@ class EntityResolver:
             entity_id=entity.entity_id,
             kind=EntityEvolutionKind.LINK,
             observation_id=ctx.observation.observation_id,
+            algorithm_version=ALGORITHM_VERSION,
             match_score=1.0,
             threshold_used=1.0,
             reasoning=f"Created entity for deterministic ID: {det_id.id_type}:{det_id.id_value}",
@@ -679,3 +687,58 @@ class _DeterministicIdResult:
     entity: Entity | None = None
     conflict: IdentityConflict | None = None
     evolution: EntityEvolution | None = None
+
+
+async def resolve_canonical_entity(
+    session: AsyncSession,
+    entity_id: UUID,
+    *,
+    compress_path: bool = True,
+) -> Entity:
+    """Resolve an entity to its canonical form, with path compression.
+
+    If an entity has been merged into another, follow the canonical_entity_id
+    chain to find the ultimate canonical entity. Optionally compresses the
+    path by updating intermediate pointers.
+
+    Args:
+        session: Database session.
+        entity_id: The entity ID to resolve.
+        compress_path: If True, update intermediate entities to point directly
+                       to the canonical entity (path compression).
+
+    Returns:
+        The canonical Entity (may be the same entity if not merged).
+
+    Raises:
+        ValueError: If the entity does not exist.
+    """
+    visited: list[Entity] = []
+    current_id = entity_id
+
+    # Follow the canonical chain
+    while True:
+        entity = await session.get(Entity, current_id)
+        if entity is None:
+            msg = f"Entity {current_id} not found"
+            raise ValueError(msg)
+
+        visited.append(entity)
+
+        if entity.canonical_entity_id is None:
+            # This is the canonical entity
+            break
+
+        current_id = entity.canonical_entity_id
+
+    canonical = visited[-1]
+
+    # Path compression: update all visited entities to point directly to canonical
+    if compress_path and len(visited) > 1:
+        for entity in visited[:-1]:
+            if entity.canonical_entity_id != canonical.entity_id:
+                entity.canonical_entity_id = canonical.entity_id
+
+        await session.flush()
+
+    return canonical

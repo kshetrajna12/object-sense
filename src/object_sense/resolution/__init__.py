@@ -13,7 +13,7 @@ Submodules:
 
 from object_sense.resolution.candidate_pool import CandidatePoolService
 from object_sense.resolution.reconciliation import reconcile_multi_seed_links
-from object_sense.resolution.resolver import EntityResolver
+from object_sense.resolution.resolver import EntityResolver, resolve_canonical_entity
 from object_sense.resolution.similarity import SimilarityScorer
 
 __all__ = [
@@ -21,4 +21,5 @@ __all__ = [
     "EntityResolver",
     "SimilarityScorer",
     "reconcile_multi_seed_links",
+    "resolve_canonical_entity",
 ]
