@@ -25,7 +25,7 @@ from object_sense.config import settings
 from object_sense.models.entity import Entity
 from object_sense.models.entity_deterministic_id import EntityDeterministicId
 from object_sense.models.enums import EntityNature, EntityStatus
-from object_sense.utils.slots import normalize_slots
+from object_sense.utils.slots import normalize_and_record_slot_warnings
 
 if TYPE_CHECKING:
     from object_sense.inference.schemas import DeterministicId
@@ -239,12 +239,11 @@ class CandidatePoolService:
         entity_id = uuid4()
 
         # Normalize slots per Slot Hygiene Contract (concept_v2.md §6.3)
+        # Also records any warnings as Evidence for debugging
         raw_slots = slots or {}
-        normalized_slots, slot_warnings = normalize_slots(raw_slots)
-
-        # Log warnings (v0: warn but don't block)
-        for warning in slot_warnings:
-            logger.warning("Entity slot hygiene: %s", warning)
+        normalized_slots = normalize_and_record_slot_warnings(
+            raw_slots, entity_id, self._session, subject_kind="entity"
+        )
 
         # Create the entity
         entity = Entity(

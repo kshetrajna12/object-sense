@@ -86,16 +86,36 @@ class TestSlotNormalizationE2E:
         # After normalization, should have wrapped structure with "type"
         assert "value" in price_slot
         assert "type" in price_slot
-        
-        # Check warnings were logged for entity-like slots
-        warnings = [r for r in caplog.records if "Entity slot hygiene" in r.message]
-        print(f"Slot hygiene warnings: {len(warnings)}")
-        for w in warnings:
+
+        # Check warnings were logged (compact format)
+        log_warnings = [r for r in caplog.records if "Slot hygiene" in r.message]
+        print(f"Log entries with slot hygiene: {len(log_warnings)}")
+        for w in log_warnings:
             print(f"  - {w.message}")
-        
-        # species and category should trigger warnings about entity references
-        warning_messages = " ".join(w.message for w in warnings)
-        assert "species" in warning_messages or "category" in warning_messages
+
+        # Should have at least one log entry about warnings
+        assert len(log_warnings) >= 1, "Expected slot hygiene warning log"
+
+        # Check Evidence records were created
+        from sqlalchemy import select
+        from object_sense.models import Evidence
+
+        stmt = select(Evidence).where(
+            Evidence.subject_id == entity.entity_id,
+            Evidence.predicate == "slot_normalization_warning",
+        )
+        evidence_result = await db_session.execute(stmt)
+        evidence_rows = evidence_result.scalars().all()
+
+        print(f"Evidence records created: {len(evidence_rows)}")
+        for ev in evidence_rows:
+            print(f"  - {ev.details}")
+
+        # Should have Evidence for species and/or category (entity-like slots)
+        slot_names = {ev.details.get("slot_name") for ev in evidence_rows}
+        assert "species" in slot_names or "category" in slot_names, (
+            f"Expected entity-like slot warnings, got: {slot_names}"
+        )
 
     async def test_entity_slots_normalized_with_type(
         self,

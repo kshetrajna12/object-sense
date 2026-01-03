@@ -456,3 +456,108 @@ class TestSlotNormalizationEdgeCases:
         value, warnings = normalize_slot("species", ref)
         assert value == ref
         assert len(warnings) == 0
+
+
+class TestSlotWarningEvidence:
+    """Tests for Evidence recording from slot warnings."""
+
+    def test_warnings_produce_evidence_records(self) -> None:
+        """Slot warnings create structured Evidence records."""
+        from object_sense.utils.slots import create_slot_warning_evidence
+
+        entity_id = uuid4()
+        warnings = [
+            "Slot 'price': bare numeric '42.99' wrapped as number (consider adding unit for clarity)",
+            "Slot 'species': freeform string 'leopard' may be better as entity reference",
+        ]
+
+        evidence = create_slot_warning_evidence(entity_id, "entity", warnings)
+
+        assert len(evidence) == 2
+
+        # Check first evidence
+        e1 = evidence[0]
+        assert e1.subject_id == entity_id
+        assert e1.predicate == "slot_normalization_warning"
+        assert e1.details["slot_name"] == "price"
+        assert e1.details["warning_code"] == "bare_numeric"
+        assert e1.details["value_type"] == "number"
+
+        # Check second evidence
+        e2 = evidence[1]
+        assert e2.details["slot_name"] == "species"
+        assert e2.details["warning_code"] == "entity_reference_candidate"
+
+    def test_no_warnings_no_evidence(self) -> None:
+        """Empty warnings list produces no Evidence."""
+        from object_sense.utils.slots import create_slot_warning_evidence
+
+        entity_id = uuid4()
+        evidence = create_slot_warning_evidence(entity_id, "entity", [])
+
+        assert len(evidence) == 0
+
+    def test_duplicate_warnings_deduplicated(self) -> None:
+        """Same (slot_name, warning_code) only produces one Evidence."""
+        from object_sense.utils.slots import create_slot_warning_evidence
+
+        entity_id = uuid4()
+        warnings = [
+            "Slot 'price': bare numeric '42.99' wrapped as number",
+            "Slot 'price': bare numeric '100' wrapped as number",  # Same slot, same code
+            "Slot 'quantity': bare numeric '5' wrapped as integer",
+        ]
+
+        evidence = create_slot_warning_evidence(entity_id, "entity", warnings)
+
+        # Should dedupe price warnings
+        assert len(evidence) == 2
+        slot_names = {e.details["slot_name"] for e in evidence}
+        assert slot_names == {"price", "quantity"}
+
+    def test_warning_cap_enforced(self) -> None:
+        """Max warnings per subject is enforced."""
+        from object_sense.utils.slots import (
+            MAX_WARNINGS_PER_SUBJECT,
+            create_slot_warning_evidence,
+        )
+
+        entity_id = uuid4()
+        # Create more unique warnings than the cap
+        warnings = [
+            f"Slot 'field_{i}': bare numeric '{i}' wrapped as integer"
+            for i in range(MAX_WARNINGS_PER_SUBJECT + 10)
+        ]
+
+        evidence = create_slot_warning_evidence(entity_id, "entity", warnings)
+
+        assert len(evidence) == MAX_WARNINGS_PER_SUBJECT
+
+    def test_evidence_has_correct_structure(self) -> None:
+        """Evidence records have all required fields."""
+        from object_sense.utils.slots import create_slot_warning_evidence
+        from object_sense.models import EvidenceSource, SubjectKind
+
+        entity_id = uuid4()
+        warnings = ["Slot 'test': malformed primitive wrapper (needs 'type' field)"]
+
+        evidence = create_slot_warning_evidence(entity_id, "entity", warnings)
+
+        assert len(evidence) == 1
+        e = evidence[0]
+
+        # Required fields
+        assert e.evidence_id is not None
+        assert e.subject_kind == SubjectKind.ENTITY
+        assert e.subject_id == entity_id
+        assert e.predicate == "slot_normalization_warning"
+        assert e.source == EvidenceSource.SYSTEM
+        assert e.score == 0.0
+
+        # Details should not contain raw values
+        assert "slot_name" in e.details
+        assert "warning_code" in e.details
+        assert "value_type" in e.details
+        # No raw values stored
+        assert "value" not in e.details
+        assert "original_value" not in e.details

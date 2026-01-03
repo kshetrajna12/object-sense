@@ -7,9 +7,11 @@ from object_sense.utils.medium import (
     probe_medium_from_path,
 )
 from object_sense.utils.slots import (
+    create_slot_warning_evidence,
     extract_slot_for_index,
     is_slot_primitive_wrapper,
     is_slot_reference,
+    normalize_and_record_slot_warnings,
     normalize_slot,
     normalize_slots,
     validate_slot,
@@ -22,9 +24,11 @@ __all__ = [
     "probe_medium",
     "probe_medium_from_path",
     # Slot utilities
+    "create_slot_warning_evidence",
     "extract_slot_for_index",
     "is_slot_primitive_wrapper",
     "is_slot_reference",
+    "normalize_and_record_slot_warnings",
     "normalize_slot",
     "normalize_slots",
     "validate_slot",

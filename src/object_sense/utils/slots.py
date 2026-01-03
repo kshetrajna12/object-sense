@@ -10,8 +10,16 @@ Goal for v0: normalize + warn (do not block ingest).
 
 from __future__ import annotations
 
-from typing import Any, TypeGuard, cast
-from uuid import UUID
+import logging
+from typing import TYPE_CHECKING, Any, TypeGuard, cast
+from uuid import UUID, uuid4
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from object_sense.models import Evidence
+
+logger = logging.getLogger(__name__)
 
 # Type aliases for slot structures
 SlotValue = dict[str, Any] | list[Any] | str | int | float | bool | None
@@ -404,3 +412,176 @@ def validate_slot(name: str, value: Any, *, strict: bool = False) -> list[str]:
         )
 
     return messages
+
+
+# Warning codes for structured Evidence
+SLOT_WARNING_CODES = {
+    "bare_numeric": "bare numeric value without unit",
+    "entity_reference_candidate": "freeform string may be better as entity reference",
+    "malformed_reference": "malformed reference structure",
+    "malformed_primitive": "malformed primitive wrapper",
+    "unrecognized_structure": "unrecognized dict structure",
+    "unsupported_type": "unsupported value type",
+    "missing_unit": "numeric value without unit",
+}
+
+# Max warnings per subject to avoid spam
+MAX_WARNINGS_PER_SUBJECT = 20
+
+
+def _parse_warning_to_structured(warning: str) -> tuple[str, str, str]:
+    """Parse a warning message into structured components.
+
+    Args:
+        warning: Raw warning message from normalize_slot
+
+    Returns:
+        Tuple of (slot_name, warning_code, value_type)
+    """
+    # Extract slot name from "Slot 'name': ..."
+    slot_name = "unknown"
+    if "Slot '" in warning:
+        start = warning.find("Slot '") + 6
+        end = warning.find("':", start)
+        if end > start:
+            slot_name = warning[start:end]
+
+    # Map warning message to code
+    warning_code = "unknown"
+    warning_lower = warning.lower()
+    if "bare numeric" in warning_lower:
+        warning_code = "bare_numeric"
+    elif "entity reference" in warning_lower:
+        warning_code = "entity_reference_candidate"
+    elif "malformed reference" in warning_lower:
+        warning_code = "malformed_reference"
+    elif "malformed primitive" in warning_lower:
+        warning_code = "malformed_primitive"
+    elif "unrecognized dict" in warning_lower:
+        warning_code = "unrecognized_structure"
+    elif "unsupported value type" in warning_lower:
+        warning_code = "unsupported_type"
+    elif "without unit" in warning_lower:
+        warning_code = "missing_unit"
+
+    # Extract value type if mentioned (e.g., "wrapped as number")
+    value_type = "unknown"
+    if "wrapped as " in warning_lower:
+        start = warning_lower.find("wrapped as ") + 11
+        end = warning_lower.find(" ", start)
+        if end == -1:
+            end = len(warning_lower)
+        value_type = warning_lower[start:end].rstrip(")")
+    elif "type '" in warning_lower:
+        start = warning_lower.find("type '") + 6
+        end = warning_lower.find("'", start)
+        if end > start:
+            value_type = warning_lower[start:end]
+
+    return slot_name, warning_code, value_type
+
+
+def create_slot_warning_evidence(
+    subject_id: UUID,
+    subject_kind: str,
+    warnings: list[str],
+) -> list["Evidence"]:
+    """Create Evidence records for slot normalization warnings.
+
+    Implements spam control:
+    - Deduplicates by (slot_name, warning_code)
+    - Caps to MAX_WARNINGS_PER_SUBJECT
+    - Stores types/codes only, not raw values
+
+    Args:
+        subject_id: The entity or observation ID.
+        subject_kind: "entity" or "observation".
+        warnings: List of warning messages from normalize_slots.
+
+    Returns:
+        List of Evidence objects to be added to the session.
+    """
+    from object_sense.models import Evidence, EvidenceSource, SubjectKind
+
+    # Map string to enum
+    sk = SubjectKind.ENTITY if subject_kind == "entity" else SubjectKind.OBSERVATION
+
+    # Deduplicate by (slot_name, warning_code)
+    seen: set[tuple[str, str]] = set()
+    evidence_records: list[Evidence] = []
+
+    for warning in warnings:
+        if len(evidence_records) >= MAX_WARNINGS_PER_SUBJECT:
+            logger.debug(
+                "Slot warning cap reached for %s %s, skipping remaining",
+                subject_kind,
+                subject_id,
+            )
+            break
+
+        slot_name, warning_code, value_type = _parse_warning_to_structured(warning)
+        dedup_key = (slot_name, warning_code)
+
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+
+        evidence = Evidence(
+            evidence_id=uuid4(),
+            subject_kind=sk,
+            subject_id=subject_id,
+            predicate="slot_normalization_warning",
+            target_id=None,
+            source=EvidenceSource.SYSTEM,
+            score=0.0,
+            details={
+                "slot_name": slot_name,
+                "warning_code": warning_code,
+                "value_type": value_type,
+            },
+        )
+        evidence_records.append(evidence)
+
+    return evidence_records
+
+
+def normalize_and_record_slot_warnings(
+    slots: dict[str, Any],
+    subject_id: UUID,
+    session: "AsyncSession",
+    subject_kind: str = "entity",
+) -> dict[str, Any]:
+    """Normalize slots and record any warnings as Evidence.
+
+    This is the preferred way to normalize slots when you have a session
+    and subject_id available. Ensures warnings are persisted for debugging.
+
+    Args:
+        slots: Raw slot dict to normalize.
+        subject_id: The entity or observation ID.
+        session: Database session for persisting Evidence.
+        subject_kind: "entity" or "observation".
+
+    Returns:
+        Normalized slots dict.
+    """
+    normalized, warnings = normalize_slots(slots)
+
+    # Log warnings (compact)
+    if warnings:
+        logger.warning(
+            "Slot hygiene [%s %s]: %d warning(s)",
+            subject_kind,
+            subject_id,
+            len(warnings),
+        )
+
+    # Create Evidence records (deduplicated, capped)
+    if warnings:
+        evidence_records = create_slot_warning_evidence(
+            subject_id, subject_kind, warnings
+        )
+        for evidence in evidence_records:
+            session.add(evidence)
+
+    return normalized
