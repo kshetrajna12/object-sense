@@ -196,13 +196,15 @@ class TestDeterministicId:
     """Tests for DeterministicId schema."""
 
     def test_minimal(self) -> None:
+        """Minimal DeterministicId - namespace is optional (engine assigns)."""
         det_id = DeterministicId(
             id_type="sku",
             id_value="PROD-12345",
         )
         assert det_id.id_type == "sku"
         assert det_id.id_value == "PROD-12345"
-        assert det_id.id_namespace == "default"
+        # id_namespace is optional - engine assigns based on id_type or context
+        assert det_id.id_namespace is None
         assert det_id.strength == "strong"
 
     def test_with_namespace(self) -> None:

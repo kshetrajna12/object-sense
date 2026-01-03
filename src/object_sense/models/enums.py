@@ -108,6 +108,7 @@ class EvidenceSource(str, Enum):
     VISION_MODEL = "vision_model"
     HEURISTIC = "heuristic"
     USER = "user"
+    SYSTEM = "system"  # Engine-controlled decisions (namespace override, etc.)
 
 
 class TypeEvolutionKind(str, Enum):

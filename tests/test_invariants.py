@@ -196,12 +196,16 @@ class TestDeterministicIdSchema:
         with pytest.raises(Exception):
             DeterministicId(id_value="12345")  # Missing id_type
 
-    def test_deterministic_id_has_namespace_default(self) -> None:
-        """DeterministicId should have default namespace."""
+    def test_deterministic_id_namespace_optional(self) -> None:
+        """DeterministicId.id_namespace is optional (engine assigns it).
+
+        Per bead object-sense-bk9: LLM omits namespace, engine assigns based on
+        id_type mapping or ingest context.
+        """
         from object_sense.inference.schemas import DeterministicId
 
         det_id = DeterministicId(id_type="sku", id_value="12345")
-        assert det_id.id_namespace == "default"
+        assert det_id.id_namespace is None  # Engine will assign
 
     def test_deterministic_id_has_strength_default(self) -> None:
         """DeterministicId should default to strong."""

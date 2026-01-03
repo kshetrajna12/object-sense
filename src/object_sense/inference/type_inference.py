@@ -96,13 +96,22 @@ Examples:
 ## Deterministic IDs (CRITICAL)
 
 If the observation contains DETERMINISTIC IDENTIFIERS, extract them:
-- SKU, product_id, ISBN, UPC (strong)
+- SKU, product_id (strong)
+- UPC, EAN, GTIN, ISBN, ASIN (strong - globally unique)
 - trip_id, booking_id, order_id (strong)
-- GPS coordinates (strong, id_type="gps", id_namespace="wgs84")
+- GPS coordinates (strong, id_type="gps")
 - SHA256 hash (strong)
 - Filenames, URLs (weak - can change)
 
 These IDs DOMINATE identity resolution. They anchor entities with posterior=1.0.
+
+**NAMESPACE ASSIGNMENT**: You do NOT need to provide id_namespace - the engine assigns it:
+- gps → geo:wgs84
+- upc/ean/gtin/isbn/asin → global:<id_type>
+- Other IDs → source:<dataset> from ingest context
+
+Just provide id_type and id_value. If you do provide a namespace, it must match:
+source:<dataset>, global:<authority>, geo:wgs84, or user:<tenant>.
 
 ## Naming Conventions
 

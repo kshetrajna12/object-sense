@@ -63,5 +63,40 @@ class Settings(BaseSettings):
     # T_margin: If best_score - second_best < this, flag for review
     entity_resolution_t_margin: float = 0.10
 
+    # ── Namespace Control (bead object-sense-bk9) ────────────────────────────
+    # Namespaces are stable system-of-record scopes, NOT arbitrary LLM labels.
+    # LLM-invented namespaces cause duplicate entities (SKU "123" in catalog_sku
+    # vs product_sku become different entities even though they're the same).
+    #
+    # Valid namespace patterns:
+    # - source:<dataset> — Explicitly provided via --id-namespace or derived from stable source ID
+    # - global:<authority> — Globally unique ID systems (upc, isbn, iucn, gtin, asin)
+    # - geo:wgs84 — GPS coordinates in WGS84 datum
+    # - user:<tenant> — User/tenant-provided IDs
+    #
+    # Enforcement: If LLM proposes invalid namespace, engine overrides to context
+    # namespace and writes Evidence with predicate="namespace_overridden".
+
+    # Namespace patterns (regex). LLM namespaces must match one of these.
+    namespace_patterns: list[str] = [
+        r"^source:[a-z0-9_-]+$",  # source:<dataset> (explicit or derived)
+        r"^global:[a-z0-9_-]+$",  # global:<authority> (upc, isbn, gtin, asin, etc.)
+        r"^geo:wgs84$",  # GPS coordinates
+        r"^user:[a-z0-9_-]+$",  # user:<tenant>
+    ]
+
+    # ID type → namespace mappings (engine-controlled, not LLM-controlled)
+    # When extraction produces these id_types, engine assigns the namespace.
+    # This ensures consistent namespacing regardless of what LLM proposes.
+    id_type_namespace_map: dict[str, str] = {
+        "gps": "geo:wgs84",
+        "upc": "global:upc",
+        "ean": "global:ean",
+        "gtin": "global:gtin",
+        "isbn": "global:isbn",
+        "asin": "global:asin",
+        "iucn_species_id": "global:iucn",
+    }
+
 
 settings = Settings()

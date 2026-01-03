@@ -58,22 +58,30 @@ class DeterministicId(BaseModel):
 
     IDs are stored as (id_type, id_value, id_namespace) tuples to handle
     cross-system uniqueness (SKU "12345" from Acme ≠ SKU "12345" from Beta).
+
+    NAMESPACE ASSIGNMENT (bead object-sense-bk9):
+    The engine controls namespace assignment, not the LLM.
+    - id_namespace is OPTIONAL - omit it and let the engine assign
+    - Engine uses id_type → namespace mapping (gps→geo:wgs84, upc→global:upc)
+    - For other IDs, engine uses ingest context (source:<dataset>)
+    - If LLM provides namespace, it's validated against allowed patterns
     """
 
     id_type: str = Field(
         description=(
             "Type of identifier: sku, product_id, trip_id, gps, booking_id, "
-            "sha256, database_pk, etc."
+            "upc, isbn, gtin, asin, sha256, database_pk, etc."
         )
     )
     id_value: str = Field(
         description="The actual identifier value (e.g., 'PROD-12345', '-25.7461,28.1881')"
     )
-    id_namespace: str = Field(
-        default="default",
+    id_namespace: str | None = Field(
+        default=None,
         description=(
-            "Namespace for uniqueness (e.g., 'acme_corp', 'wgs84', 'internal'). "
-            "Prevents collisions across systems."
+            "OPTIONAL - Engine assigns namespace automatically based on id_type and context. "
+            "If provided, must match allowed patterns: source:<dataset>, global:<authority>, "
+            "geo:wgs84, user:<tenant>. Invalid namespaces are overridden."
         ),
     )
     strength: Literal["strong", "weak"] = Field(

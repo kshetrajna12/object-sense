@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
 from uuid import UUID, uuid4
@@ -75,33 +77,115 @@ def run_async(coro):
     return asyncio.run(coro)
 
 
+@dataclass
+class NamespaceOverride:
+    """Record of a namespace override for Evidence tracking."""
+
+    id_type: str
+    id_value: str
+    original_namespace: str | None
+    resolved_namespace: str
+    reason: str  # "id_type_mapped", "invalid_pattern", "empty_namespace"
+
+
+@dataclass
+class UnionResult:
+    """Result of _union_deterministic_ids with override tracking."""
+
+    ids: list[dict[str, str]]
+    overrides: list[NamespaceOverride]
+
+
+def _is_valid_namespace(namespace: str) -> bool:
+    """Check if namespace matches allowed patterns."""
+    from object_sense.config import settings
+
+    for pattern in settings.namespace_patterns:
+        if re.match(pattern, namespace):
+            return True
+    return False
+
+
+def _resolve_namespace(
+    id_type: str,
+    proposed_namespace: str | None,
+    context_namespace: str,
+) -> tuple[str, str | None]:
+    """Resolve the canonical namespace for a deterministic ID.
+
+    Returns (resolved_namespace, override_reason or None).
+
+    Resolution order:
+    1. ID type → namespace mapping (engine-controlled, always wins)
+    2. Valid proposed namespace (matches allowed patterns)
+    3. Fallback to context namespace
+    """
+    from object_sense.config import settings
+
+    # 1. ID type mapping takes precedence (engine-controlled)
+    if id_type in settings.id_type_namespace_map:
+        mapped = settings.id_type_namespace_map[id_type]
+        if proposed_namespace and proposed_namespace != mapped:
+            return mapped, "id_type_mapped"
+        return mapped, None
+
+    # 2. Check if proposed namespace is valid
+    if proposed_namespace and _is_valid_namespace(proposed_namespace):
+        return proposed_namespace, None
+
+    # 3. Override to context namespace
+    reason = "invalid_pattern" if proposed_namespace else "empty_namespace"
+    return context_namespace, reason
+
+
 def _union_deterministic_ids(
     extracted_ids: list[ExtractedId],
     llm_ids: list[DeterministicId],
-) -> list[dict[str, str]]:
-    """Union deterministic IDs from extraction and LLM, with deduplication.
+    context_namespace: str,
+) -> UnionResult:
+    """Union deterministic IDs from extraction and LLM, with namespace enforcement.
 
-    Returns a list of dicts suitable for JSONB storage on observation.
-    Deduplicates by (id_type, id_value, id_namespace) tuple.
+    Engine controls namespaces (bead object-sense-bk9):
+    - ID type mappings take precedence (gps→geo:wgs84, upc→global:upc)
+    - Invalid LLM namespaces are overridden to context_namespace
+    - Overrides are tracked for Evidence recording
+
+    Args:
+        extracted_ids: IDs from extraction (Step 3) - already have valid namespaces
+        llm_ids: IDs from LLM (Step 4) - may have invalid/missing namespaces
+        context_namespace: Fallback namespace (e.g., "source:product_catalog")
+
+    Returns:
+        UnionResult with merged IDs and namespace override events.
     """
     seen: set[tuple[str, str, str]] = set()
     result: list[dict[str, str]] = []
+    overrides: list[NamespaceOverride] = []
 
-    # Add extracted IDs first (they're the reliable baseline)
+    # Add extracted IDs first (they're the reliable baseline with valid namespaces)
     for eid in extracted_ids:
-        key = (eid.id_type, eid.id_value, eid.id_namespace)
+        # Apply ID type mapping even to extracted IDs for consistency
+        namespace, reason = _resolve_namespace(eid.id_type, eid.id_namespace, context_namespace)
+        key = (eid.id_type, eid.id_value, namespace)
         if key not in seen:
             seen.add(key)
             result.append({
                 "id_type": eid.id_type,
                 "id_value": eid.id_value,
-                "id_namespace": eid.id_namespace,
+                "id_namespace": namespace,
             })
+            if reason:
+                overrides.append(NamespaceOverride(
+                    id_type=eid.id_type,
+                    id_value=eid.id_value,
+                    original_namespace=eid.id_namespace,
+                    resolved_namespace=namespace,
+                    reason=reason,
+                ))
 
-    # Add LLM IDs (may supplement with additional IDs)
+    # Add LLM IDs with namespace enforcement
     for lid in llm_ids:
-        # Normalize namespace - never allow null/empty
-        namespace = lid.id_namespace if lid.id_namespace else "llm"
+        namespace, reason = _resolve_namespace(lid.id_type, lid.id_namespace, context_namespace)
         key = (lid.id_type, lid.id_value, namespace)
         if key not in seen:
             seen.add(key)
@@ -110,8 +194,16 @@ def _union_deterministic_ids(
                 "id_value": lid.id_value,
                 "id_namespace": namespace,
             })
+            if reason:
+                overrides.append(NamespaceOverride(
+                    id_type=lid.id_type,
+                    id_value=lid.id_value,
+                    original_namespace=lid.id_namespace,
+                    resolved_namespace=namespace,
+                    reason=reason,
+                ))
 
-    return result
+    return UnionResult(ids=result, overrides=overrides)
 
 
 def _extracted_to_entity_hypothesis(extracted_ids: list[ExtractedId]) -> list[EntityHypothesis]:
@@ -163,7 +255,11 @@ async def get_or_create_type(session, type_name: str, created_via: TypeCreatedVi
     return new_type
 
 
-async def ingest_file(file_path: Path, verbose: bool = False) -> dict:
+async def ingest_file(
+    file_path: Path,
+    verbose: bool = False,
+    id_namespace: str | None = None,
+) -> dict:
     """Ingest a single file through the full pipeline.
 
     Pipeline:
@@ -175,11 +271,21 @@ async def ingest_file(file_path: Path, verbose: bool = False) -> dict:
 
     All writes occur in a single transaction - rollback leaves zero side-effects.
 
+    Args:
+        file_path: Path to the file to ingest.
+        verbose: If True, log detailed output.
+        id_namespace: Explicit namespace for deterministic IDs (e.g., "source:product_catalog").
+                      If not provided, uses "source:ingest" as default.
+
     Returns dict with observation_id, type, medium, and status.
     """
     import logging
 
     logger = logging.getLogger(__name__)
+
+    # Derive context namespace (bead object-sense-bk9)
+    # Explicit id_namespace takes precedence, otherwise use default
+    context_namespace = id_namespace or "source:ingest"
 
     # Read file content
     content = file_path.read_bytes()
@@ -256,12 +362,14 @@ async def ingest_file(file_path: Path, verbose: bool = False) -> dict:
             facets = type_proposal.facets
             reasoning = type_proposal.reasoning
 
-        # Union deterministic_ids from extraction + LLM (dedupe by tuple)
+        # Union deterministic_ids from extraction + LLM with namespace enforcement
         llm_det_ids = type_proposal.deterministic_ids if type_proposal else []
-        deterministic_ids = _union_deterministic_ids(
+        union_result = _union_deterministic_ids(
             extraction_result.deterministic_ids,
             llm_det_ids,
+            context_namespace,
         )
+        deterministic_ids = union_result.ids
 
         # Create blob if needed
         if existing_blob:
@@ -345,6 +453,35 @@ async def ingest_file(file_path: Path, verbose: bool = False) -> dict:
             )
             session.add(evidence)
 
+        # Record evidence for namespace overrides (bead object-sense-bk9)
+        for override in union_result.overrides:
+            evidence = Evidence(
+                evidence_id=uuid4(),
+                subject_kind=SubjectKind.OBSERVATION,
+                subject_id=observation_id,
+                predicate="namespace_overridden",
+                target_id=None,
+                source=EvidenceSource.SYSTEM,
+                score=1.0,  # System decisions are definitive
+                details={
+                    "id_type": override.id_type,
+                    "id_value": override.id_value,
+                    "original_namespace": override.original_namespace,
+                    "resolved_namespace": override.resolved_namespace,
+                    "reason": override.reason,
+                },
+            )
+            session.add(evidence)
+            if verbose:
+                logger.info(
+                    "Namespace override: %s:%s from '%s' to '%s' (%s)",
+                    override.id_type,
+                    override.id_value,
+                    override.original_namespace,
+                    override.resolved_namespace,
+                    override.reason,
+                )
+
         # Flush to ensure observation and signatures have IDs before resolver
         await session.flush()
 
@@ -402,6 +539,16 @@ def ingest(
     verbose: Annotated[
         bool, typer.Option("--verbose", "-v", help="Show detailed output")
     ] = False,
+    id_namespace: Annotated[
+        str | None,
+        typer.Option(
+            "--id-namespace",
+            help=(
+                "Namespace for deterministic IDs (e.g., 'source:product_catalog'). "
+                "Controls identity resolution scope. Defaults to 'source:ingest'."
+            ),
+        ),
+    ] = None,
 ):
     """Ingest files into ObjectSense.
 
@@ -434,7 +581,7 @@ def ingest(
         for file_path in files_to_process:
             try:
                 console.print(f"  Processing: {file_path.name}...", end=" ")
-                result = await ingest_file(file_path, verbose=verbose)
+                result = await ingest_file(file_path, verbose=verbose, id_namespace=id_namespace)
                 results.append(result)
 
                 if result["status"] == "duplicate":
