@@ -1,10 +1,9 @@
 # Design Notes — Object Sense Engine
 
-> **Note (2025-12):** This file contains historical design discussions. For the current authoritative design, see:
-> - `design_v2_corrections.md` — Type Authority & Entity Resolution Clarifications (active spec)
-> - `concept_v1.md` — Original concept document (reference only)
->
-> After implementation stabilizes, a unified `concept_v2.md` will replace these.
+> **Note (2026-01):** This file contains historical design discussions. For the current authoritative design, see:
+> - `concept_v2.md` — **Authoritative specification** (current)
+> - `design_v2_corrections.md` — Design rationale and correction details
+> - `concept_v1.md` — Original concept document (historical reference only)
 
 ---
 
