@@ -184,7 +184,18 @@ class EntityResolver:
         evolutions: list[EntityEvolution] = []
         result_flags: list[str] = []
 
-        # Process each entity seed
+        # INVARIANT (bead object-sense-bk9): Observation-level deterministic IDs
+        # anchor entities REGARDLESS of what's in entity_seeds.
+        # This ensures same SKU in different files → same entity.
+        obs_det_ids_result = await self._resolve_observation_deterministic_ids(ctx)
+        pending_links.extend(obs_det_ids_result.links)
+        entities_created.extend(obs_det_ids_result.entities)
+        conflicts.extend(obs_det_ids_result.conflicts)
+        evolutions.extend(obs_det_ids_result.evolutions)
+        if obs_det_ids_result.links:
+            result_flags.append(f"obs_det_ids_resolved:{len(obs_det_ids_result.links)}")
+
+        # Process each entity seed (for additional entities like class/group/event)
         for seed_idx, seed in enumerate(entity_seeds):
             seed_result = await self._resolve_seed(ctx, seed, seed_idx)
 
@@ -255,6 +266,103 @@ class EntityResolver:
             conflicts_created=conflicts,
             evolutions=evolutions,
             flags=result_flags,
+        )
+
+    async def _resolve_observation_deterministic_ids(
+        self,
+        ctx: ResolutionContext,
+    ) -> _SeedResolutionResult:
+        """Resolve entities from observation-level deterministic IDs.
+
+        INVARIANT (bead object-sense-bk9): Observation.deterministic_ids anchor
+        entities REGARDLESS of entity_seeds. This ensures:
+        - Same SKU in different files → same entity
+        - Entity deduplication doesn't depend on LLM including IDs in seeds
+
+        Args:
+            ctx: Resolution context with observation.
+
+        Returns:
+            Results with links/entities for each strong deterministic ID.
+        """
+        from object_sense.inference.schemas import DeterministicId
+
+        links: list[PendingLink] = []
+        entities: list[Entity] = []
+        conflicts: list[IdentityConflict] = []
+        evolutions: list[EntityEvolution] = []
+
+        obs_det_ids = ctx.observation.deterministic_ids or []
+
+        for det_id_dict in obs_det_ids:
+            # INVARIANT: All IDs should have namespaces after normalization
+            assert det_id_dict.get("id_namespace"), (
+                f"Observation deterministic ID missing namespace: {det_id_dict}"
+            )
+
+            # Convert dict to DeterministicId
+            det_id = DeterministicId(
+                id_type=det_id_dict["id_type"],
+                id_value=det_id_dict["id_value"],
+                id_namespace=det_id_dict["id_namespace"],
+                strength="strong",  # Observation-level IDs are strong
+            )
+
+            # Lookup existing entity by deterministic ID
+            lookup_result = await self._pool.lookup_by_deterministic_id(det_id)
+
+            if lookup_result.entity:
+                # Found existing entity - hard link
+                link = PendingLink(
+                    entity_id=lookup_result.entity.entity_id,
+                    posterior=1.0,
+                    status="hard",
+                    role=LinkRole.SUBJECT,  # Default role for observation-level IDs
+                    seed_index=-1,  # Not from a seed
+                    facets={},
+                    flags=["from_observation_det_id"],
+                )
+                links.append(link)
+                logger.debug(
+                    "Linked observation %s to entity %s via det_id %s:%s",
+                    ctx.observation.observation_id,
+                    lookup_result.entity.entity_id,
+                    det_id.id_type,
+                    det_id.id_value,
+                )
+            else:
+                # ID not found - create new entity anchored to this ID
+                entity = await self._pool.create_entity_for_deterministic_id(
+                    det_id,
+                    entity_nature=EntityNature.INDIVIDUAL,
+                    name=f"{det_id.id_type}:{det_id.id_value}",
+                    slots={},
+                )
+                entities.append(entity)
+
+                link = PendingLink(
+                    entity_id=entity.entity_id,
+                    posterior=1.0,
+                    status="hard",
+                    role=LinkRole.SUBJECT,
+                    seed_index=-1,
+                    facets={},
+                    flags=["from_observation_det_id", "entity_created"],
+                )
+                links.append(link)
+                logger.debug(
+                    "Created entity %s for observation %s via det_id %s:%s",
+                    entity.entity_id,
+                    ctx.observation.observation_id,
+                    det_id.id_type,
+                    det_id.id_value,
+                )
+
+        return _SeedResolutionResult(
+            links=links,
+            entities=entities,
+            conflicts=conflicts,
+            evolutions=evolutions,
         )
 
     async def _resolve_seed(

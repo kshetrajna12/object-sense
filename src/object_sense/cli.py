@@ -89,11 +89,15 @@ class NamespaceOverride:
 
 
 @dataclass
-class UnionResult:
-    """Result of _union_deterministic_ids with override tracking."""
+class NormalizedIds:
+    """Result of normalize_deterministic_ids with override tracking."""
 
-    ids: list[dict[str, str]]
+    ids: list[DeterministicId]
     overrides: list[NamespaceOverride]
+
+
+# Legacy alias for backwards compatibility
+UnionResult = NormalizedIds
 
 
 def _is_valid_namespace(namespace: str) -> bool:
@@ -138,11 +142,68 @@ def _resolve_namespace(
     return context_namespace, reason
 
 
+def normalize_deterministic_ids(
+    ids: list[DeterministicId] | list[ExtractedId],
+    context_namespace: str,
+) -> NormalizedIds:
+    """Normalize namespace for deterministic IDs from any source.
+
+    This is the SINGLE function for namespace enforcement (bead object-sense-bk9).
+    Apply it to:
+    - extracted observation deterministic_ids
+    - LLM observation deterministic_ids
+    - each entity_seed.deterministic_ids
+
+    Rules:
+    1. if id_type in id_type_namespace_map → set namespace accordingly
+    2. else if namespace missing/invalid → set to context_namespace
+    3. if LLM provided invalid namespace → override + record NamespaceOverride
+
+    Args:
+        ids: List of DeterministicId or ExtractedId objects
+        context_namespace: Fallback namespace (e.g., "source:product_catalog")
+
+    Returns:
+        NormalizedIds with normalized IDs (as DeterministicId) and override events.
+    """
+    result: list[DeterministicId] = []
+    overrides: list[NamespaceOverride] = []
+
+    for id_obj in ids:
+        # Handle both DeterministicId and ExtractedId
+        id_type = id_obj.id_type
+        id_value = id_obj.id_value
+        original_namespace = id_obj.id_namespace
+        strength = id_obj.strength if hasattr(id_obj, "strength") else "strong"
+
+        namespace, reason = _resolve_namespace(id_type, original_namespace, context_namespace)
+
+        # Create normalized DeterministicId
+        normalized = DeterministicId(
+            id_type=id_type,
+            id_value=id_value,
+            id_namespace=namespace,
+            strength=strength if strength in ("strong", "weak") else "strong",
+        )
+        result.append(normalized)
+
+        if reason:
+            overrides.append(NamespaceOverride(
+                id_type=id_type,
+                id_value=id_value,
+                original_namespace=original_namespace,
+                resolved_namespace=namespace,
+                reason=reason,
+            ))
+
+    return NormalizedIds(ids=result, overrides=overrides)
+
+
 def _union_deterministic_ids(
     extracted_ids: list[ExtractedId],
     llm_ids: list[DeterministicId],
     context_namespace: str,
-) -> UnionResult:
+) -> NormalizedIds:
     """Union deterministic IDs from extraction and LLM, with namespace enforcement.
 
     Engine controls namespaces (bead object-sense-bk9):
@@ -151,59 +212,41 @@ def _union_deterministic_ids(
     - Overrides are tracked for Evidence recording
 
     Args:
-        extracted_ids: IDs from extraction (Step 3) - already have valid namespaces
-        llm_ids: IDs from LLM (Step 4) - may have invalid/missing namespaces
+        extracted_ids: IDs from extraction (Step 3)
+        llm_ids: IDs from LLM (Step 4)
         context_namespace: Fallback namespace (e.g., "source:product_catalog")
 
     Returns:
-        UnionResult with merged IDs and namespace override events.
+        NormalizedIds with merged, deduplicated IDs and namespace override events.
     """
+    # Normalize both sources
+    extracted_result = normalize_deterministic_ids(extracted_ids, context_namespace)
+    llm_result = normalize_deterministic_ids(llm_ids, context_namespace)
+
+    # Deduplicate by (id_type, id_value, id_namespace) tuple
     seen: set[tuple[str, str, str]] = set()
-    result: list[dict[str, str]] = []
-    overrides: list[NamespaceOverride] = []
+    merged: list[DeterministicId] = []
 
-    # Add extracted IDs first (they're the reliable baseline with valid namespaces)
-    for eid in extracted_ids:
-        # Apply ID type mapping even to extracted IDs for consistency
-        namespace, reason = _resolve_namespace(eid.id_type, eid.id_namespace, context_namespace)
-        key = (eid.id_type, eid.id_value, namespace)
+    # Add extracted first (baseline)
+    for det_id in extracted_result.ids:
+        assert det_id.id_namespace is not None, "Normalized ID must have namespace"
+        key = (det_id.id_type, det_id.id_value, det_id.id_namespace)
         if key not in seen:
             seen.add(key)
-            result.append({
-                "id_type": eid.id_type,
-                "id_value": eid.id_value,
-                "id_namespace": namespace,
-            })
-            if reason:
-                overrides.append(NamespaceOverride(
-                    id_type=eid.id_type,
-                    id_value=eid.id_value,
-                    original_namespace=eid.id_namespace,
-                    resolved_namespace=namespace,
-                    reason=reason,
-                ))
+            merged.append(det_id)
 
-    # Add LLM IDs with namespace enforcement
-    for lid in llm_ids:
-        namespace, reason = _resolve_namespace(lid.id_type, lid.id_namespace, context_namespace)
-        key = (lid.id_type, lid.id_value, namespace)
+    # Add LLM IDs (supplementary)
+    for det_id in llm_result.ids:
+        assert det_id.id_namespace is not None, "Normalized ID must have namespace"
+        key = (det_id.id_type, det_id.id_value, det_id.id_namespace)
         if key not in seen:
             seen.add(key)
-            result.append({
-                "id_type": lid.id_type,
-                "id_value": lid.id_value,
-                "id_namespace": namespace,
-            })
-            if reason:
-                overrides.append(NamespaceOverride(
-                    id_type=lid.id_type,
-                    id_value=lid.id_value,
-                    original_namespace=lid.id_namespace,
-                    resolved_namespace=namespace,
-                    reason=reason,
-                ))
+            merged.append(det_id)
 
-    return UnionResult(ids=result, overrides=overrides)
+    # Combine overrides
+    all_overrides = extracted_result.overrides + llm_result.overrides
+
+    return NormalizedIds(ids=merged, overrides=all_overrides)
 
 
 def _extracted_to_entity_hypothesis(extracted_ids: list[ExtractedId]) -> list[EntityHypothesis]:
@@ -233,6 +276,44 @@ def _extracted_to_entity_hypothesis(extracted_ids: list[ExtractedId]) -> list[En
         )
         hypotheses.append(hyp)
     return hypotheses
+
+
+def _normalize_entity_seed_namespaces(
+    entity_seeds: list[EntityHypothesis],
+    context_namespace: str,
+) -> tuple[list[EntityHypothesis], list[NamespaceOverride]]:
+    """Apply namespace enforcement to entity_seeds' deterministic_ids.
+
+    LLM-produced entity_seeds may have deterministic_ids with invalid or missing
+    namespaces. Uses the consolidated normalize_deterministic_ids function.
+
+    Returns (normalized_seeds, overrides) where overrides are for Evidence.
+    """
+    normalized: list[EntityHypothesis] = []
+    all_overrides: list[NamespaceOverride] = []
+
+    for seed in entity_seeds:
+        if not seed.deterministic_ids:
+            normalized.append(seed)
+            continue
+
+        # Use consolidated normalization function
+        result = normalize_deterministic_ids(seed.deterministic_ids, context_namespace)
+        all_overrides.extend(result.overrides)
+
+        # Create new EntityHypothesis with normalized IDs
+        new_seed = EntityHypothesis(
+            entity_type=seed.entity_type,
+            entity_nature=seed.entity_nature,
+            suggested_name=seed.suggested_name,
+            slots=seed.slots,
+            deterministic_ids=result.ids,
+            confidence=seed.confidence,
+            reasoning=seed.reasoning,
+        )
+        normalized.append(new_seed)
+
+    return normalized, all_overrides
 
 
 async def get_or_create_type(session, type_name: str, created_via: TypeCreatedVia) -> Type:
@@ -369,7 +450,15 @@ async def ingest_file(
             llm_det_ids,
             context_namespace,
         )
-        deterministic_ids = union_result.ids
+        # Convert to dicts for JSONB storage
+        deterministic_ids = [
+            {
+                "id_type": det_id.id_type,
+                "id_value": det_id.id_value,
+                "id_namespace": det_id.id_namespace,
+            }
+            for det_id in union_result.ids
+        ]
 
         # Create blob if needed
         if existing_blob:
@@ -499,6 +588,32 @@ async def ingest_file(
         links_created = 0
 
         if entity_seeds:
+            # Normalize entity_seed namespaces before resolution
+            entity_seeds, seed_overrides = _normalize_entity_seed_namespaces(
+                entity_seeds, context_namespace
+            )
+
+            # Record evidence for entity seed namespace overrides
+            for override in seed_overrides:
+                evidence = Evidence(
+                    evidence_id=uuid4(),
+                    subject_kind=SubjectKind.OBSERVATION,
+                    subject_id=observation_id,
+                    predicate="namespace_overridden",
+                    target_id=None,
+                    source=EvidenceSource.SYSTEM,
+                    score=1.0,
+                    details={
+                        "id_type": override.id_type,
+                        "id_value": override.id_value,
+                        "original_namespace": override.original_namespace,
+                        "resolved_namespace": override.resolved_namespace,
+                        "reason": override.reason,
+                        "source": "entity_seed",
+                    },
+                )
+                session.add(evidence)
+
             resolver = EntityResolver(session)
             resolution_result = await resolver.resolve(
                 observation=obs,

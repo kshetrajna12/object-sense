@@ -113,8 +113,8 @@ class TestUnionDeterministicIds:
         result = _union_deterministic_ids(extracted, [], "source:default")
 
         assert len(result.ids) == 1
-        assert result.ids[0]["id_value"] == "PROD-001"
-        assert result.ids[0]["id_namespace"] == "source:catalog"
+        assert result.ids[0].id_value == "PROD-001"
+        assert result.ids[0].id_namespace == "source:catalog"
         assert len(result.overrides) == 0
 
     def test_llm_invalid_namespace_overridden(self) -> None:
@@ -129,7 +129,7 @@ class TestUnionDeterministicIds:
         result = _union_deterministic_ids([], llm_ids, "source:product_catalog")
 
         assert len(result.ids) == 1
-        assert result.ids[0]["id_namespace"] == "source:product_catalog"  # Overridden
+        assert result.ids[0].id_namespace == "source:product_catalog"  # Overridden
         assert len(result.overrides) == 1
         assert result.overrides[0].reason == "invalid_pattern"
         assert result.overrides[0].original_namespace == "catalog_sku"
@@ -145,7 +145,7 @@ class TestUnionDeterministicIds:
         ]
         result = _union_deterministic_ids([], llm_ids, "source:catalog")
 
-        assert result.ids[0]["id_namespace"] == "source:catalog"
+        assert result.ids[0].id_namespace == "source:catalog"
         assert len(result.overrides) == 1
         assert result.overrides[0].reason == "empty_namespace"
 
@@ -165,8 +165,8 @@ class TestUnionDeterministicIds:
         ]
         result = _union_deterministic_ids([], llm_ids, "source:default")
 
-        assert result.ids[0]["id_namespace"] == "geo:wgs84"
-        assert result.ids[1]["id_namespace"] == "global:upc"
+        assert result.ids[0].id_namespace == "geo:wgs84"
+        assert result.ids[1].id_namespace == "global:upc"
 
     def test_deduplication_by_tuple(self) -> None:
         """IDs are deduplicated by (type, value, namespace) tuple."""
@@ -225,9 +225,9 @@ class TestUnionDeterministicIds:
 
         # Both should be overridden to same namespace, then deduplicated
         assert len(result.ids) == 1
-        assert result.ids[0]["id_namespace"] == "source:product_catalog"
-        # Only one override recorded (second is deduplicated)
-        assert len(result.overrides) == 1
+        assert result.ids[0].id_namespace == "source:product_catalog"
+        # Two overrides recorded (before dedup), but only one ID
+        assert len(result.overrides) == 2
 
 
 class TestCrossFileEntityResolution:
@@ -253,14 +253,14 @@ class TestCrossFileEntityResolution:
 
         # The ID tuples should be identical → same entity
         tuple1 = (
-            result1.ids[0]["id_type"],
-            result1.ids[0]["id_value"],
-            result1.ids[0]["id_namespace"],
+            result1.ids[0].id_type,
+            result1.ids[0].id_value,
+            result1.ids[0].id_namespace,
         )
         tuple2 = (
-            result2.ids[0]["id_type"],
-            result2.ids[0]["id_value"],
-            result2.ids[0]["id_namespace"],
+            result2.ids[0].id_type,
+            result2.ids[0].id_value,
+            result2.ids[0].id_namespace,
         )
 
         assert tuple1 == tuple2
@@ -291,18 +291,18 @@ class TestCrossFileEntityResolution:
         result2 = _union_deterministic_ids([], file2_ids, "source:product_catalog")
 
         # Both overridden to context namespace
-        assert result1.ids[0]["id_namespace"] == "source:product_catalog"
-        assert result2.ids[0]["id_namespace"] == "source:product_catalog"
+        assert result1.ids[0].id_namespace == "source:product_catalog"
+        assert result2.ids[0].id_namespace == "source:product_catalog"
 
         # Same entity key
         tuple1 = (
-            result1.ids[0]["id_type"],
-            result1.ids[0]["id_value"],
-            result1.ids[0]["id_namespace"],
+            result1.ids[0].id_type,
+            result1.ids[0].id_value,
+            result1.ids[0].id_namespace,
         )
         tuple2 = (
-            result2.ids[0]["id_type"],
-            result2.ids[0]["id_value"],
-            result2.ids[0]["id_namespace"],
+            result2.ids[0].id_type,
+            result2.ids[0].id_value,
+            result2.ids[0].id_namespace,
         )
         assert tuple1 == tuple2
