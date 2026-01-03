@@ -153,15 +153,45 @@ See `design_notes.md` for full walkthrough and "Aardvark Paradox" resolution.
 - Prefer explicit over clever
 
 ## Files
-- `inital_idea.md` — Original high-level concept document
+- `concept_v2.md` — **Authoritative specification** (current canonical reference)
+- `design_v2_corrections.md` — Design rationale and correction details
 - `design_notes.md` — Ongoing design discussion notes
-- `concept_v1.md` — **Complete concept document** (this is the canonical reference)
+- `concept_v1.md` — Original concept document (historical reference only)
+- `inital_idea.md` — Original high-level concept document
 
 ## Beads Workflow
 - Use beads (`bd`) for tracking multi-session work, dependencies, and discovered issues
 - **Always add descriptions** when creating issues — titles alone lose context across sessions
 - When closing an "OPEN:" beads issue, document the decision in `design_notes.md`
 - Beads tracks **work items**; docs track **knowledge and decisions**
+
+### Beads + Git Branches (IMPORTANT)
+
+This repo uses `sync.branch = main`, meaning beads syncs to main via a git worktree regardless of your current branch.
+
+**When working on feature branches:**
+```bash
+# Option A: One-way sync (recommended)
+git checkout -b feature/foo
+# ... do work ...
+bd sync --from-main --no-push   # Read-only sync from main, don't write back
+# ... when done, merge to main first, THEN run bd sync
+
+# Option B: Don't sync on feature branches
+git checkout -b feature/foo
+# ... do work, skip bd sync entirely ...
+git checkout main
+git merge feature/foo
+bd sync   # Now safe to sync
+```
+
+**NEVER run `bd sync` on a feature branch** — it commits to main via worktree and causes divergence.
+
+**Session end on feature branch:**
+1. Commit your code changes to the feature branch
+2. Do NOT run `bd sync`
+3. Push feature branch, create PR
+4. After merge to main, checkout main and run `bd sync`
 
 ## Skills
 - Proactively suggest new skills when repetitive patterns emerge or when a reusable capability would help
