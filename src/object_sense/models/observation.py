@@ -6,12 +6,12 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from sqlalchemy import DateTime, ForeignKey, String, func
+from sqlalchemy import DateTime, Float, ForeignKey, String, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from object_sense.models.base import Base
-from object_sense.models.enums import Medium, ObservationStatus
+from object_sense.models.enums import LinkRole, LinkStatus, Medium, ObservationStatus
 
 if TYPE_CHECKING:
     from object_sense.models.blob import Blob
@@ -90,6 +90,12 @@ class ObservationEntityLink(Base):
 
     Represents which entities an observation refers to. An Observation can
     link to multiple Entities (e.g., a photo depicting multiple animals).
+
+    See design_v2_corrections.md §5 for link semantics:
+    - posterior: Confidence score 0-1
+    - status: hard (deterministic ID) | soft (similarity) | candidate (uncertain)
+    - role: subject (primary) | context (supporting)
+    - flags: Multi-seed conflicts, low-evidence markers, etc.
     """
 
     __tablename__ = "observation_entity_links"
@@ -98,7 +104,19 @@ class ObservationEntityLink(Base):
         ForeignKey("observations.observation_id"), primary_key=True
     )
     entity_id: Mapped[UUID] = mapped_column(ForeignKey("entities.entity_id"), primary_key=True)
-    role: Mapped[str | None] = mapped_column(String(255))
+
+    posterior: Mapped[float] = mapped_column(Float, default=1.0)
+    """Confidence score 0-1. 1.0 for deterministic ID matches."""
+
+    status: Mapped[LinkStatus] = mapped_column(default=LinkStatus.SOFT)
+    """Link type: hard (ID match), soft (similarity), candidate (uncertain)."""
+
+    role: Mapped[LinkRole | None] = mapped_column()
+    """Role of entity in observation: subject (primary) or context (supporting)."""
+
+    flags: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    """Conflict/warning flags: multi_seed_role_conflict, low_evidence, etc."""
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     # Relationships

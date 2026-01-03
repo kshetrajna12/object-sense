@@ -3,6 +3,7 @@
 from object_sense.models.base import Base
 from object_sense.models.blob import Blob
 from object_sense.models.entity import Entity
+from object_sense.models.entity_deterministic_id import EntityDeterministicId
 from object_sense.models.entity_evolution import EntityEvolution
 from object_sense.models.enums import (
     EntityEvolutionKind,
@@ -10,6 +11,8 @@ from object_sense.models.enums import (
     EntityStatus,
     EvidenceSource,
     IdentityConflictStatus,
+    LinkRole,
+    LinkStatus,
     Medium,
     ObservationStatus,
     SubjectKind,
@@ -30,6 +33,7 @@ __all__ = [
     "Base",
     "Blob",
     "Entity",
+    "EntityDeterministicId",
     "EntityEvolution",
     "EntityEvolutionKind",
     "EntityNature",
@@ -38,6 +42,8 @@ __all__ = [
     "EvidenceSource",
     "IdentityConflict",
     "IdentityConflictStatus",
+    "LinkRole",
+    "LinkStatus",
     "Medium",
     "Observation",
     "ObservationEntityLink",

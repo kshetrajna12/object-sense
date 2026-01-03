@@ -119,6 +119,30 @@ class TypeEvolutionKind(str, Enum):
     DEPRECATE = "deprecate"  # Type retired
 
 
+class LinkStatus(str, Enum):
+    """Status of an observation-entity link (Correction #5).
+
+    - hard: Deterministic ID match, posterior=1.0, high confidence
+    - soft: Similarity-based link, confidence above T_link threshold
+    - candidate: Uncertain, in the "don't know" band [T_new, T_link]
+    """
+
+    HARD = "hard"  # Deterministic ID match
+    SOFT = "soft"  # High-confidence similarity
+    CANDIDATE = "candidate"  # Uncertain, needs validation
+
+
+class LinkRole(str, Enum):
+    """Role of an entity in an observation (v0: subject + context only).
+
+    - subject: The observation is primarily about this entity
+    - context: The entity is present/supporting (location, species, group)
+    """
+
+    SUBJECT = "subject"
+    CONTEXT = "context"
+
+
 class Affordance(str, Enum):
     """Capabilities enabled by a medium.
 
