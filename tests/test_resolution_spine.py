@@ -21,6 +21,7 @@ from object_sense.models import (
     EntityDeterministicId,
     EntityNature,
     EntityStatus,
+    IdentityConflict,
     LinkStatus,
     ObservationEntityLink,
 )
@@ -32,6 +33,50 @@ if TYPE_CHECKING:
 
 # Mark all tests in this module as integration tests
 pytestmark = pytest.mark.integration
+
+
+class TestFixtureSanity:
+    """Verify test fixtures are using real Postgres, not SQLite."""
+
+    async def test_using_postgres_not_sqlite(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """Sanity check: we're using Postgres with pgvector, not SQLite."""
+        from sqlalchemy import text
+
+        # Check database dialect
+        result = await db_session.execute(text("SELECT version()"))
+        version = result.scalar()
+        assert version is not None
+        assert "PostgreSQL" in version, f"Expected PostgreSQL, got: {version}"
+
+        # Check pgvector extension is available
+        result = await db_session.execute(
+            text("SELECT extname FROM pg_extension WHERE extname = 'vector'")
+        )
+        ext = result.scalar()
+        assert ext == "vector", "pgvector extension not installed"
+
+    async def test_unique_constraint_on_deterministic_ids(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """Verify unique constraint on entity_deterministic_ids tuple."""
+        from sqlalchemy import text
+
+        # Check the unique index exists
+        result = await db_session.execute(
+            text("""
+                SELECT indexname, indexdef
+                FROM pg_indexes
+                WHERE tablename = 'entity_deterministic_ids'
+                AND indexname = 'ix_entity_det_id_lookup'
+            """)
+        )
+        row = result.fetchone()
+        assert row is not None, "Unique index ix_entity_det_id_lookup not found"
+        assert "UNIQUE" in row[1], f"Index is not unique: {row[1]}"
 
 
 class TestDeterministicIdCreateOnMiss:
@@ -109,7 +154,7 @@ class TestDeterministicIdCreateOnMiss:
         assert link.status == LinkStatus.HARD
         assert link.posterior == 1.0
 
-        # Verify: entity_deterministic_ids has exactly 1 row
+        # Verify: entity_deterministic_ids has exactly 1 row for the tuple
         stmt = select(EntityDeterministicId).where(
             EntityDeterministicId.entity_id == entity.entity_id
         )
@@ -119,6 +164,21 @@ class TestDeterministicIdCreateOnMiss:
         assert det_id_rows[0].id_type == "sku"
         assert det_id_rows[0].id_value == "TEST-001"
         assert det_id_rows[0].id_namespace == "acme"
+
+        # Verify: no duplicate deterministic IDs for same tuple (unique constraint)
+        stmt = select(EntityDeterministicId).where(
+            EntityDeterministicId.id_type == "sku",
+            EntityDeterministicId.id_value == "TEST-001",
+            EntityDeterministicId.id_namespace == "acme",
+        )
+        all_det_ids = await db_session.execute(stmt)
+        assert len(all_det_ids.scalars().all()) == 1, "Duplicate deterministic ID detected"
+
+        # Verify: identity_conflicts stays empty on happy path
+        assert len(result.conflicts_created) == 0, "Unexpected identity conflicts"
+        stmt = select(IdentityConflict)
+        conflicts_result = await db_session.execute(stmt)
+        assert len(conflicts_result.scalars().all()) == 0, "identity_conflicts should be empty"
 
     async def test_second_observation_reuses_entity(
         self,

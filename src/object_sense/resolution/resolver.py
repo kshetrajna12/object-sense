@@ -207,11 +207,19 @@ class EntityResolver:
         final_links = deduplicate_links(reconciled.links)
 
         # Convert pending links to ObservationEntityLink
+        # Always resolve to canonical entity to handle race conditions where
+        # a merge happens between candidate retrieval and link write.
         obs_entity_links: list[ObservationEntityLink] = []
         for link in final_links:
+            # Resolve to canonical entity (with path compression)
+            canonical_entity = await resolve_canonical_entity(
+                self._session, link.entity_id, compress_path=True
+            )
+            canonical_id = canonical_entity.entity_id
+
             oel = ObservationEntityLink(
                 observation_id=observation.observation_id,
-                entity_id=link.entity_id,
+                entity_id=canonical_id,
                 posterior=link.posterior,
                 status=LinkStatus(link.status),
                 role=link.role,
@@ -220,15 +228,14 @@ class EntityResolver:
             obs_entity_links.append(oel)
             self._session.add(oel)
 
-            # Update prototype if link qualifies
-            entity = await self._session.get(Entity, link.entity_id)
-            if entity and self._should_update_prototype(link):
-                await self._update_prototype(entity, ctx.observation_signals, link)
+            # Update prototype on the canonical entity
+            if self._should_update_prototype(link):
+                await self._update_prototype(canonical_entity, ctx.observation_signals, link)
 
-            # Create evolution record for link
+            # Create evolution record for link (to canonical entity)
             evolution = EntityEvolution(
                 evolution_id=uuid4(),
-                entity_id=link.entity_id,
+                entity_id=canonical_id,
                 kind=EntityEvolutionKind.LINK,
                 observation_id=observation.observation_id,
                 algorithm_version=ALGORITHM_VERSION,
