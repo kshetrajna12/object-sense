@@ -2,11 +2,27 @@
 
 This module implements similarity computation between observations and entities.
 
-Key principles (per user spec):
-- Signal weights are renormalized among available signals
-- Coverage scalar: sqrt(W_present) to penalize sparse evidence
-- Low-evidence guardrail: if W_present < 0.25 or < 2 signals, mark as low_evidence
-- One resolver with different weight profiles per entity_nature
+Key principles:
+- Signal weights are renormalized among available signals (ignore missing)
+- For sparse signals (1-2 available), return renormalized score directly
+- Coverage penalty only applies when 3+ signals expected but few available
+- Low-evidence flag for transparency, but doesn't crush score
+- Primary signal guardrails (e.g., T_img_min for INDIVIDUAL image matches)
+
+Signal Regimes:
+- image-only: Common for wildlife photos. Score ≈ cosine(image_embedding).
+- image+facets: Better evidence. Score combines visual + attribute agreement.
+- text+facets: For CLASS entities. Score combines semantic + attribute.
+
+Contextual Signals (timestamp, GPS):
+- For INDIVIDUAL entities, timestamp/GPS are WEAK PRIORS only
+- They can NARROW candidate pool (locality prior) but NEVER gate merges
+- Visual similarity MUST pass hard thresholds first (T_img_min, T_link)
+- Context signals can only:
+  a) Nudge posterior score (small boost if spatiotemporally close)
+  b) Create pending/review links (never auto-merge on context alone)
+- GPS is NOT a deterministic ID - it has inherent imprecision (~5-10m)
+  and causes false splits when treated as hard identity
 
 See design_v2_corrections.md §5 and §6 for specifications.
 """
@@ -47,10 +63,22 @@ class SimilarityResult:
     """Coverage scalar: sqrt(W_present). Lower = sparser evidence."""
 
     is_low_evidence: bool
-    """True if W_present < 0.25 or < 2 signals available."""
+    """True if < 2 signals available. Informational, doesn't crush score."""
 
     flags: list[str] = field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
-    """Warning flags: low_evidence, missing_embedding, etc."""
+    """Warning flags: low_evidence, sparse_signal, etc."""
+
+    # Primary signal scores for guardrail checks
+    image_similarity: float | None = None
+    """Raw cosine similarity for image embedding (before weighting)."""
+
+    text_similarity: float | None = None
+    """Raw cosine similarity for text embedding (before weighting)."""
+
+    @property
+    def signal_scores(self) -> dict[str, float]:
+        """Get available signal scores as a dict."""
+        return {s.signal_name: s.score for s in self.signals if s.available}
 
 
 # Signal weight profiles per entity_nature (sum to 1.0)
@@ -89,6 +117,33 @@ MIN_WEIGHT_THRESHOLD = 0.25
 
 # Minimum number of signals for low-evidence flag
 MIN_SIGNALS_THRESHOLD = 2
+
+
+def haversine_km(
+    coord1: tuple[float, float],
+    coord2: tuple[float, float],
+) -> float:
+    """Compute haversine distance between two GPS coordinates in kilometers.
+
+    Args:
+        coord1: (latitude, longitude) in degrees
+        coord2: (latitude, longitude) in degrees
+
+    Returns:
+        Distance in kilometers
+    """
+    R = 6371.0  # Earth's radius in km
+
+    lat1, lon1 = math.radians(coord1[0]), math.radians(coord1[1])
+    lat2, lon2 = math.radians(coord2[0]), math.radians(coord2[1])
+
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+
+    a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    c = 2 * math.asin(math.sqrt(a))
+
+    return R * c
 
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -145,6 +200,12 @@ class SimilarityScorer:
     ) -> SimilarityResult:
         """Compute similarity between an observation and an entity.
 
+        Scoring approach:
+        - Renormalize weights among AVAILABLE signals only
+        - For sparse signals (1-2), return renormalized weighted sum directly
+        - Coverage penalty only for rich-signal cases with missing data
+        - Always track raw primary signal scores for guardrail checks
+
         Args:
             observation_signals: Extracted signals from the observation.
             entity: The candidate entity to compare against.
@@ -156,6 +217,10 @@ class SimilarityScorer:
         weights = self._weights.get(entity_nature, self._weights[EntityNature.INDIVIDUAL])
         signals: list[SignalResult] = []
         flags: list[str] = []
+
+        # Track primary signal scores for guardrails
+        image_similarity: float | None = None
+        text_similarity: float | None = None
 
         # Compute each signal
         for signal_name, weight in weights.items():
@@ -171,8 +236,15 @@ class SimilarityScorer:
                 available=available,
             ))
 
+            # Capture primary signal scores for guardrails
+            if signal_name == "image_embedding" and available:
+                image_similarity = score
+            elif signal_name == "text_embedding" and available:
+                text_similarity = score
+
         # Renormalize weights for available signals
         available_signals = [s for s in signals if s.available]
+        n_available = len(available_signals)
         w_present = sum(s.weight for s in available_signals)
 
         if w_present == 0:
@@ -183,25 +255,40 @@ class SimilarityScorer:
                 coverage=0.0,
                 is_low_evidence=True,
                 flags=["no_signals_available"],
+                image_similarity=image_similarity,
+                text_similarity=text_similarity,
             )
 
         # Compute weighted score with renormalization
+        # Key fix: renormalized weights sum to 1.0, so we get the true weighted average
         weighted_sum = sum(
             (s.weight / w_present) * s.score
             for s in available_signals
         )
 
-        # Coverage scalar: sqrt(W_present)
+        # Coverage handling:
+        # - For sparse signals (1-2), use score directly (no penalty)
+        # - For rich evidence (3+), apply mild coverage adjustment
         coverage = math.sqrt(w_present)
 
-        # Apply coverage penalty
-        final_score = weighted_sum * coverage
+        if n_available <= 2:
+            # Sparse signal regime: trust the available signals
+            # Don't penalize for missing signals that aren't available
+            final_score = weighted_sum
+            if n_available == 1:
+                flags.append("single_signal")
+            else:
+                flags.append("sparse_signals")
+        else:
+            # Rich signal regime: mild coverage adjustment
+            # Only penalize if we have 3+ signals but low total weight
+            if w_present < 0.5:
+                final_score = weighted_sum * (0.7 + 0.3 * coverage)
+            else:
+                final_score = weighted_sum
 
-        # Check low-evidence conditions
-        is_low_evidence = (
-            w_present < MIN_WEIGHT_THRESHOLD
-            or len(available_signals) < MIN_SIGNALS_THRESHOLD
-        )
+        # Low-evidence is informational only (doesn't crush score)
+        is_low_evidence = n_available < MIN_SIGNALS_THRESHOLD
 
         if is_low_evidence:
             flags.append("low_evidence")
@@ -212,6 +299,8 @@ class SimilarityScorer:
             coverage=coverage,
             is_low_evidence=is_low_evidence,
             flags=flags,
+            image_similarity=image_similarity,
+            text_similarity=text_similarity,
         )
 
     def _compute_signal(
@@ -362,18 +451,107 @@ class SimilarityScorer:
         obs: ObservationSignals,
         entity: Entity,
     ) -> tuple[float, bool]:
-        """Compute location similarity."""
-        # v0: Not implemented - requires GPS slots
-        return 0.0, False
+        """Compute location similarity using GPS coordinates.
+
+        Uses haversine distance. Score decays with distance:
+        - 0 km: 1.0
+        - 5 km: ~0.7
+        - 20 km: ~0.3
+        - 50+ km: ~0.0
+        """
+        if obs.gps_coords is None:
+            return 0.0, False
+
+        # Try to get entity GPS from slots
+        entity_gps = self._get_entity_gps(entity)
+        if entity_gps is None:
+            return 0.0, False
+
+        dist_km = haversine_km(obs.gps_coords, entity_gps)
+
+        # Exponential decay: score = exp(-dist / scale)
+        # scale=10 means ~0.37 at 10km, ~0.14 at 20km
+        score = math.exp(-dist_km / 10.0)
+        return score, True
+
+    def _get_entity_gps(self, entity: Entity) -> tuple[float, float] | None:
+        """Extract GPS coordinates from entity slots."""
+        if not entity.slots:
+            return None
+
+        lat = entity.slots.get("latitude") or entity.slots.get("gps_latitude")
+        lon = entity.slots.get("longitude") or entity.slots.get("gps_longitude")
+
+        if lat is None or lon is None:
+            return None
+
+        try:
+            # Handle slot format: could be {"value": "..."} or direct value
+            if isinstance(lat, dict):
+                lat = lat.get("value")
+            if isinstance(lon, dict):
+                lon = lon.get("value")
+            return (float(lat), float(lon))
+        except (ValueError, TypeError):
+            return None
 
     def _compute_timestamp(
         self,
         obs: ObservationSignals,
         entity: Entity,
     ) -> tuple[float, bool]:
-        """Compute timestamp similarity."""
-        # v0: Not implemented - requires temporal slots
-        return 0.0, False
+        """Compute timestamp similarity.
+
+        Score decays with time difference:
+        - 0 hours: 1.0
+        - 2 hours: ~0.7
+        - 12 hours: ~0.3
+        - 48+ hours: ~0.0
+        """
+        if obs.timestamp is None:
+            return 0.0, False
+
+        # Try to get entity timestamp from slots
+        entity_ts = self._get_entity_timestamp(entity)
+        if entity_ts is None:
+            return 0.0, False
+
+        delta_hours = abs(obs.timestamp - entity_ts) / 3600.0
+
+        # Exponential decay: score = exp(-delta / scale)
+        # scale=6 means ~0.37 at 6h, ~0.14 at 12h
+        score = math.exp(-delta_hours / 6.0)
+        return score, True
+
+    def _get_entity_timestamp(self, entity: Entity) -> float | None:
+        """Extract timestamp from entity slots."""
+        if not entity.slots:
+            return None
+
+        ts = (
+            entity.slots.get("timestamp")
+            or entity.slots.get("datetime")
+            or entity.slots.get("last_seen")
+        )
+
+        if ts is None:
+            return None
+
+        try:
+            # Handle slot format
+            if isinstance(ts, dict):
+                ts = ts.get("value")
+
+            if isinstance(ts, (int, float)):
+                return float(ts)
+            elif isinstance(ts, str):
+                from datetime import datetime
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                return dt.timestamp()
+        except (ValueError, TypeError):
+            pass
+
+        return None
 
     def _compute_temporal_proximity(
         self,
@@ -480,11 +658,40 @@ class ObservationSignals:
             if sig.hash_value and hash_value is None:
                 hash_value = sig.hash_value
 
+        # Extract GPS and timestamp from observation facets
+        gps_coords: tuple[float, float] | None = None
+        timestamp: float | None = None
+        facets = observation.facets if hasattr(observation, "facets") else None
+
+        if facets:
+            # Try to extract GPS coordinates
+            lat = facets.get("latitude") or facets.get("gps_latitude")
+            lon = facets.get("longitude") or facets.get("gps_longitude")
+            if lat is not None and lon is not None:
+                try:
+                    gps_coords = (float(lat), float(lon))
+                except (ValueError, TypeError):
+                    pass
+
+            # Try to extract timestamp
+            ts = facets.get("timestamp") or facets.get("datetime") or facets.get("capture_time")
+            if ts is not None:
+                try:
+                    if isinstance(ts, (int, float)):
+                        timestamp = float(ts)
+                    elif isinstance(ts, str):
+                        # Try parsing ISO format
+                        from datetime import datetime
+                        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                        timestamp = dt.timestamp()
+                except (ValueError, TypeError):
+                    pass
+
         return cls(
             image_embedding=image_embedding,
             text_embedding=text_embedding,
             clip_text_embedding=clip_text_embedding,
-            facets=observation.facets if hasattr(observation, "facets") else None,
+            facets=facets,
             suggested_name=(
                 entity_hypothesis.suggested_name
                 if entity_hypothesis and hasattr(entity_hypothesis, "suggested_name")
@@ -492,4 +699,6 @@ class ObservationSignals:
             ),
             hash_value=hash_value,
             source_id=observation.source_id if hasattr(observation, "source_id") else None,
+            gps_coords=gps_coords,
+            timestamp=timestamp,
         )

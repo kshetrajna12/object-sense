@@ -691,15 +691,19 @@ class TestCoverageScalingInteraction:
         )
 
         # With only image_embedding available (weight 0.35), coverage = sqrt(0.35) ≈ 0.59
-        # This is < 1.0 so there IS a penalty, but we verify the math is correct
+        # Coverage is tracked but NOT used to penalize sparse signals
         assert result.coverage == pytest.approx(0.5916, rel=0.01)
-        # Score should be raw_score * coverage
-        # cosine_similarity of identical vectors = 1.0, so weighted = 1.0
-        # final = 1.0 * 0.5916 ≈ 0.59
-        assert result.score == pytest.approx(0.5916, rel=0.01)
+        # For single-signal cases (sparse), score = raw similarity (no penalty)
+        # cosine_similarity of identical vectors = 1.0
+        assert result.score == pytest.approx(1.0, rel=0.01)
+        assert "single_signal" in result.flags
 
-    def test_low_coverage_penalizes_score(self) -> None:
-        """Low coverage should penalize even high raw scores."""
+    def test_sparse_signal_not_penalized(self) -> None:
+        """Sparse signals (1-2 available) should NOT be penalized.
+
+        This is a key behavior change: for image-only observations, we
+        trust the available signal rather than penalizing for missing data.
+        """
         scorer = SimilarityScorer()
 
         # Create entity with minimal signals
@@ -718,13 +722,15 @@ class TestCoverageScalingInteraction:
             entity_nature=EntityNature.INDIVIDUAL,
         )
 
-        # Coverage = sqrt(0.35) ≈ 0.59
+        # Coverage is still computed but doesn't affect score
         expected_coverage = (0.35) ** 0.5
         assert result.coverage == pytest.approx(expected_coverage, rel=0.01)
 
-        # Even with perfect similarity (1.0), score is penalized
-        # final_score = 1.0 * 0.59 ≈ 0.59 < T_link (0.85)
-        assert result.score < T_LINK
+        # Key assertion: perfect similarity should NOT be penalized
+        # Score should be close to 1.0, not 0.59
+        assert result.score >= T_LINK, (
+            f"Sparse signal score {result.score:.2f} should be >= T_LINK {T_LINK}"
+        )
 
     @pytest.mark.asyncio
     async def test_high_raw_score_low_coverage_drops_below_t_link(

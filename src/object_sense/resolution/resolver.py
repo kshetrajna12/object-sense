@@ -47,6 +47,7 @@ from object_sense.models.enums import (
 from object_sense.models.identity_conflict import IdentityConflict
 from object_sense.models.observation import Observation, ObservationEntityLink
 from object_sense.resolution.candidate_pool import CandidatePoolService, EntityCandidate
+from object_sense.resolution.similarity import SimilarityResult
 from object_sense.resolution.reconciliation import (
     PendingLink,
     deduplicate_links,
@@ -127,6 +128,8 @@ class EntityResolver:
         t_link: float | None = None,
         t_new: float | None = None,
         t_margin: float | None = None,
+        t_img_min: float | None = None,
+        t_margin_img: float | None = None,
         top_k: int = 200,
     ) -> None:
         """Initialize the resolver.
@@ -136,12 +139,16 @@ class EntityResolver:
             t_link: High confidence threshold (default from config).
             t_new: Low confidence threshold (default from config).
             t_margin: Margin for review flag (default from config).
+            t_img_min: Minimum image similarity for INDIVIDUAL merges.
+            t_margin_img: Margin threshold for image-only decisions.
             top_k: Number of ANN candidates to retrieve.
         """
         self._session = session
         self._t_link = t_link or settings.entity_resolution_t_link
         self._t_new = t_new or settings.entity_resolution_t_new
         self._t_margin = t_margin or settings.entity_resolution_t_margin
+        self._t_img_min = t_img_min or settings.entity_resolution_t_img_min
+        self._t_margin_img = t_margin_img or settings.entity_resolution_t_margin_img
         self._top_k = top_k
 
         self._pool = CandidatePoolService(session, default_top_k=top_k)
@@ -561,25 +568,90 @@ class EntityResolver:
             links.append(link)
             return _SeedResolutionResult(links=links, entities=entities, evolutions=evolutions)
 
-        # Score candidates
-        scored: list[tuple[EntityCandidate, float]] = []
+        # Score candidates - keep full SimilarityResult for guardrail checks
+        scored: list[tuple[EntityCandidate, SimilarityResult]] = []
         for candidate in candidates:
             sim_result = self._scorer.compute(
                 observation_signals=ctx.observation_signals,
                 entity=candidate.entity,
                 entity_nature=entity_nature,
             )
-            scored.append((candidate, sim_result.score))
+            scored.append((candidate, sim_result))
 
         # Sort by score descending
-        scored.sort(key=lambda x: x[1], reverse=True)
+        scored.sort(key=lambda x: x[1].score, reverse=True)
 
-        best_candidate, best_score = scored[0]
-        second_best_score = scored[1][1] if len(scored) > 1 else 0.0
+        best_candidate, best_result = scored[0]
+        best_score = best_result.score
+        second_best_score = scored[1][1].score if len(scored) > 1 else 0.0
+        margin = best_score - second_best_score
+
+        # Log detailed scoring info for debugging
+        logger.debug(
+            "Similarity scoring: seed=%d candidates=%d best_score=%.4f "
+            "second_best=%.4f margin=%.4f image_sim=%s text_sim=%s flags=%s",
+            seed_idx,
+            len(candidates),
+            best_score,
+            second_best_score,
+            margin,
+            f"{best_result.image_similarity:.4f}" if best_result.image_similarity else "N/A",
+            f"{best_result.text_similarity:.4f}" if best_result.text_similarity else "N/A",
+            best_result.flags,
+        )
+
+        # Apply INDIVIDUAL image guardrails
+        # For INDIVIDUAL entities in sparse signal regime, apply stricter checks
+        passes_image_guardrail = True
+        image_guardrail_flags: list[str] = []
+
+        if entity_nature == EntityNature.INDIVIDUAL and best_result.image_similarity is not None:
+            # Check T_img_min: minimum raw image similarity
+            if best_result.image_similarity < self._t_img_min:
+                passes_image_guardrail = False
+                image_guardrail_flags.append("below_t_img_min")
+
+            # Check image margin for sparse signal cases
+            if "single_signal" in best_result.flags or "sparse_signals" in best_result.flags:
+                # For image-only, use stricter margin
+                if margin < self._t_margin_img:
+                    image_guardrail_flags.append("low_image_margin")
+
+            # SINGLE CANDIDATE GUARDRAIL: If only one candidate in pool,
+            # don't auto-merge unless score is VERY high (>= 0.95).
+            # This prevents false merges when the pool is sparse.
+            if len(candidates) == 1:
+                image_guardrail_flags.append("single_candidate")
+                if best_score < 0.95:
+                    passes_image_guardrail = False
+                    image_guardrail_flags.append("single_candidate_low_score")
+                    logger.info(
+                        "Single candidate guardrail: blocking merge "
+                        "(only 1 candidate, score=%.4f < 0.95)",
+                        best_score,
+                    )
 
         # Apply decision thresholds
-        if best_score >= self._t_link:
+        # Log threshold comparisons for debugging
+        logger.debug(
+            "Decision thresholds: best_score=%.4f t_link=%.3f t_new=%.3f "
+            "passes_guardrail=%s guardrail_flags=%s",
+            best_score,
+            self._t_link,
+            self._t_new,
+            passes_image_guardrail,
+            image_guardrail_flags,
+        )
+
+        if best_score >= self._t_link and passes_image_guardrail:
             # High confidence - soft link to existing entity
+            logger.info(
+                "LINK DECISION: soft link to existing entity %s "
+                "(score=%.4f >= t_link=%.3f, guardrail=PASS)",
+                best_candidate.entity.entity_id,
+                best_score,
+                self._t_link,
+            )
             link = PendingLink(
                 entity_id=best_candidate.entity.entity_id,
                 posterior=best_score,
@@ -592,10 +664,20 @@ class EntityResolver:
             if best_score - second_best_score < self._t_margin:
                 link.flags.append("margin_review")
 
+            # Add image guardrail flags if any
+            link.flags.extend(image_guardrail_flags)
+
             links.append(link)
 
         elif best_score >= self._t_new:
             # Uncertain - create candidate links to both
+            logger.info(
+                "LINK DECISION: candidate links (uncertain) "
+                "(t_new=%.3f <= score=%.4f < t_link=%.3f)",
+                self._t_new,
+                best_score,
+                self._t_link,
+            )
             # Link to best candidate
             link_existing = PendingLink(
                 entity_id=best_candidate.entity.entity_id,
@@ -623,6 +705,12 @@ class EntityResolver:
 
         else:
             # Low confidence - create new proto-entity
+            logger.info(
+                "LINK DECISION: new proto-entity (score=%.4f < t_new=%.3f or guardrail_fail=%s)",
+                best_score,
+                self._t_new,
+                not passes_image_guardrail,
+            )
             proto = await self._create_proto_entity(ctx, seed, entity_nature)
             entities.append(proto)
 
@@ -669,6 +757,15 @@ class EntityResolver:
     ) -> Entity:
         """Create a new proto-entity from a seed.
 
+        IMPORTANT: Seeds prototype embeddings at creation time to break the
+        "prototype deadlock" where entities with NULL prototypes can never
+        be retrieved by ANN search and thus never get linked/updated.
+
+        Seeding strategy (conservative - prefer false split over false merge):
+        - Only seed image prototypes for engine-owned subject seeds (entity_type="photo_subject")
+          to avoid polluting ANN pool with irrelevant entities (photographer, GPS-derived, etc.)
+        - CLASS/GROUP/EVENT: seed prototype_text_embedding if available (semantic)
+
         Args:
             ctx: Resolution context.
             seed: Entity hypothesis.
@@ -686,6 +783,46 @@ class EntityResolver:
             raw_slots, entity_id, self._session, subject_kind="entity"
         )
 
+        # Inject GPS/timestamp from observation for INDIVIDUAL entities.
+        # These are used by location/timestamp similarity scoring.
+        if entity_nature == EntityNature.INDIVIDUAL:
+            obs_signals = ctx.observation_signals
+            if obs_signals.gps_coords and "latitude" not in normalized_slots:
+                normalized_slots["latitude"] = {"value": obs_signals.gps_coords[0]}
+                normalized_slots["longitude"] = {"value": obs_signals.gps_coords[1]}
+            if obs_signals.timestamp and "datetime" not in normalized_slots:
+                from datetime import datetime, timezone
+                dt = datetime.fromtimestamp(obs_signals.timestamp, tz=timezone.utc)
+                normalized_slots["datetime"] = {"value": dt.isoformat()}
+
+        # Seed prototype embeddings to break the prototype deadlock.
+        # CRITICAL: Only seed image prototypes for engine-owned subject seeds
+        # (entity_type="photo_subject"). Other INDIVIDUAL entities (photographer,
+        # GPS-derived location, etc.) should NOT get image prototypes - they would
+        # pollute the ANN pool and cause wrong merges.
+        prototype_image_embedding: list[float] | None = None
+        prototype_text_embedding: list[float] | None = None
+        prototype_count = 0
+
+        # Engine-owned subject seed for visual re-ID
+        is_engine_subject_seed = (
+            entity_nature == EntityNature.INDIVIDUAL
+            and seed.entity_type == "photo_subject"
+        )
+
+        if is_engine_subject_seed:
+            # Only the engine-owned subject gets image prototype
+            if ctx.observation_signals.image_embedding:
+                prototype_image_embedding = ctx.observation_signals.image_embedding
+                prototype_count = 1
+        elif entity_nature != EntityNature.INDIVIDUAL:
+            # CLASS/GROUP/EVENT: seed with text embedding for semantic matching
+            if ctx.observation_signals.text_embedding:
+                prototype_text_embedding = ctx.observation_signals.text_embedding
+                prototype_count = 1
+        # else: LLM-proposed INDIVIDUAL entities (photographer, location, etc.)
+        # do NOT get image prototypes - they're not for visual re-ID
+
         entity = Entity(
             entity_id=entity_id,
             entity_nature=entity_nature,
@@ -693,16 +830,19 @@ class EntityResolver:
             slots=normalized_slots,
             status=EntityStatus.PROTO,
             confidence=seed.confidence,
-            prototype_count=0,
+            prototype_count=prototype_count,
+            prototype_image_embedding=prototype_image_embedding,
+            prototype_text_embedding=prototype_text_embedding,
         )
         self._session.add(entity)
         await self._session.flush()
 
         logger.debug(
-            "Created proto-entity %s (%s) for seed '%s'",
+            "Created proto-entity %s (%s) for seed '%s' with prototype_count=%d",
             entity.entity_id,
             entity_nature.value,
             seed.suggested_name,
+            prototype_count,
         )
 
         return entity
@@ -725,11 +865,33 @@ class EntityResolver:
         - Update on hard links always
         - Update on soft links only if posterior >= T_link
         """
+        should_update = False
+        reason = "unknown"
+
         if link.status == "hard":
-            return True
-        if link.status == "soft" and link.posterior >= self._t_link:
-            return True
-        return False
+            should_update = True
+            reason = "hard_link"
+        elif link.status == "soft" and link.posterior >= self._t_link:
+            should_update = True
+            reason = f"soft_above_t_link({self._t_link})"
+        elif link.status == "soft":
+            reason = f"soft_below_t_link({link.posterior:.3f}<{self._t_link})"
+        elif link.status == "candidate":
+            reason = "candidate_status"
+        else:
+            reason = f"unhandled_status({link.status})"
+
+        logger.debug(
+            "Prototype update decision: entity=%s status=%s posterior=%.3f "
+            "t_link=%.3f should_update=%s reason=%s",
+            link.entity_id,
+            link.status,
+            link.posterior,
+            self._t_link,
+            should_update,
+            reason,
+        )
+        return should_update
 
     async def _update_prototype(
         self,
@@ -743,24 +905,48 @@ class EntityResolver:
         new_proto = (proto * count + emb * weight) / (count + weight)
 
         Weight is capped at 0.5 for soft links to prevent yanking.
+        Count always increments by 1 (each observation contributes once).
+
+        IMPORTANT: Only update IMAGE prototypes for photo_subject entities
+        (those with GPS in slots or no name). Entities from deterministic IDs
+        (camera_serial, lens_serial, image_unique_id) should NOT get image
+        prototypes as they pollute the ANN pool for visual re-ID.
         """
-        # Determine weight
+        # Determine weight for embedding averaging
         if link.status == "hard":
             weight = 1.0
         else:
             # Cap soft link weight at 0.5
             weight = min(link.posterior, 0.5)
 
-        # Update image prototype
-        if signals.image_embedding and entity.prototype_image_embedding is not None:
+        old_count = entity.prototype_count
+        updated_img = False
+        updated_txt = False
+
+        # Check if this entity should get image prototype updates
+        # Only photo_subject entities (with GPS or unnamed) get image prototypes
+        # Entities from deterministic IDs (camera, lens, image_id) do NOT
+        is_photo_subject = False
+        if entity.slots:
+            # Has GPS → it's a photo_subject we created
+            if entity.slots.get("latitude") or entity.slots.get("gps_latitude"):
+                is_photo_subject = True
+        if not entity.name:
+            # Unnamed entity → likely a photo_subject
+            is_photo_subject = True
+
+        # Update image prototype (ONLY for photo_subject entities)
+        if signals.image_embedding and entity.prototype_image_embedding is not None and is_photo_subject:
             entity.prototype_image_embedding = self._weighted_average(
                 list(entity.prototype_image_embedding),
                 signals.image_embedding,
                 entity.prototype_count,
                 weight,
             )
-        elif signals.image_embedding and entity.prototype_image_embedding is None:
+            updated_img = True
+        elif signals.image_embedding and entity.prototype_image_embedding is None and is_photo_subject:
             entity.prototype_image_embedding = signals.image_embedding
+            updated_img = True
 
         # Update text prototype
         if signals.text_embedding and entity.prototype_text_embedding is not None:
@@ -770,11 +956,27 @@ class EntityResolver:
                 entity.prototype_count,
                 weight,
             )
+            updated_txt = True
         elif signals.text_embedding and entity.prototype_text_embedding is None:
             entity.prototype_text_embedding = signals.text_embedding
+            updated_txt = True
 
-        # Update count
-        entity.prototype_count += int(weight)
+        # Update count - always increment by 1 for each contributing observation
+        # (not int(weight) which would be 0 for soft links!)
+        if updated_img or updated_txt:
+            entity.prototype_count += 1
+
+        logger.debug(
+            "Prototype update: entity=%s status=%s weight=%.3f "
+            "count=%d->%d updated_img=%s updated_txt=%s",
+            entity.entity_id,
+            link.status,
+            weight,
+            old_count,
+            entity.prototype_count,
+            updated_img,
+            updated_txt,
+        )
 
     def _weighted_average(
         self,

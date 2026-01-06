@@ -13,11 +13,21 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
 from uuid import UUID, uuid4
+
+# Configure logging from environment variable
+_log_level = os.environ.get("LOG_LEVEL", "WARNING").upper()
+logging.basicConfig(
+    level=getattr(logging, _log_level, logging.WARNING),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
 
 import typer
 from rich.console import Console
@@ -31,13 +41,13 @@ from object_sense.extraction.base import ExtractedId
 from object_sense.extraction.orchestrator import ExtractionOrchestrator
 from object_sense.inference.schemas import DeterministicId, EntityHypothesis, TypeProposal
 from object_sense.inference.type_inference import TypeInferenceAgent
-from object_sense.models.signature import Signature
-from object_sense.resolution.resolver import EntityResolver
 from object_sense.models import (
     Blob,
     Entity,
+    EntityNature,
     Evidence,
     EvidenceSource,
+    Medium,
     Observation,
     ObservationStatus,
     Signature,
@@ -46,6 +56,7 @@ from object_sense.models import (
     TypeCreatedVia,
     TypeStatus,
 )
+from object_sense.resolution.resolver import EntityResolver
 from object_sense.services.type_candidate import TypeCandidateService
 from object_sense.utils.medium import probe_medium
 
@@ -443,6 +454,33 @@ async def ingest_file(
             facets = type_proposal.facets
             reasoning = type_proposal.reasoning
 
+        # Merge GPS/datetime from extraction into facets (engine-owned, not LLM-dependent)
+        # This ensures context signals are always available for entity resolution.
+        if extraction_result.extra:
+            extra = extraction_result.extra
+            # GPS coordinates
+            if "gps_latitude" in extra and "latitude" not in facets:
+                facets["latitude"] = extra["gps_latitude"]
+            if "gps_longitude" in extra and "longitude" not in facets:
+                facets["longitude"] = extra["gps_longitude"]
+            if "gps_altitude" in extra and "altitude" not in facets:
+                facets["altitude"] = extra["gps_altitude"]
+            # Datetime from EXIF (nested in exif dict)
+            # Prefer datetimeoriginal (capture time) over datetime (modification time)
+            exif = extra.get("exif", {})
+            if exif and "datetime" not in facets:
+                # EXIF datetime formats: 'YYYY:MM:DD HH:MM:SS' → 'YYYY-MM-DDTHH:MM:SSZ'
+                raw_dt = exif.get("datetimeoriginal") or exif.get("datetime")
+                if raw_dt and isinstance(raw_dt, str):
+                    try:
+                        # Convert EXIF datetime format to ISO8601
+                        facets["datetime"] = raw_dt.replace(":", "-", 2).replace(" ", "T") + "Z"
+                    except Exception:
+                        pass
+            # Also try direct filename extraction (backup)
+            if "filename" not in facets and "filename" in extra:
+                facets["filename"] = extra["filename"]
+
         # Union deterministic_ids from extraction + LLM with namespace enforcement
         llm_det_ids = type_proposal.deterministic_ids if type_proposal else []
         union_result = _union_deterministic_ids(
@@ -578,10 +616,60 @@ async def ingest_file(
         # Determine entity_seeds: from LLM if available, else from extracted IDs
         entity_seeds: list[EntityHypothesis] = []
         if type_proposal and type_proposal.entity_seeds:
-            entity_seeds = type_proposal.entity_seeds
+            entity_seeds = list(type_proposal.entity_seeds)  # Copy to allow mutation
         elif extraction_result.deterministic_ids:
             # LLM failed but we have extracted IDs - create minimal hypotheses
             entity_seeds = _extracted_to_entity_hypothesis(extraction_result.deterministic_ids)
+
+        # ENGINE GUARDRAIL: Strip GPS from ALL deterministic IDs
+        # GPS should NEVER be a deterministic ID - it causes false splits due to
+        # inherent imprecision (~5-10m). GPS is a weak locality prior only.
+        # See similarity.py docstring for contextual signal policy.
+        for seed in entity_seeds:
+            if seed.deterministic_ids:
+                original_count = len(seed.deterministic_ids)
+                seed.deterministic_ids = [
+                    did for did in seed.deterministic_ids
+                    if did.id_type.lower() != "gps"
+                ]
+                if len(seed.deterministic_ids) < original_count:
+                    # Record that we stripped GPS
+                    evidence = Evidence(
+                        evidence_id=uuid4(),
+                        subject_kind=SubjectKind.OBSERVATION,
+                        subject_id=observation_id,
+                        predicate="gps_id_stripped",
+                        target_id=None,
+                        source=EvidenceSource.SYSTEM,
+                        score=1.0,
+                        details={
+                            "seed_entity_type": seed.entity_type,
+                            "reason": "GPS is a weak prior, not a deterministic ID",
+                        },
+                    )
+                    session.add(evidence)
+
+        # ENGINE-OWNED SEED: Ensure image observations have a photo_subject entity
+        # for visual re-ID. This breaks the prototype deadlock by seeding image
+        # prototypes. IMPORTANT: Check for entity_type="photo_subject" specifically,
+        # not just any INDIVIDUAL (the LLM may propose camera/location as individual).
+        # The seed has NO deterministic IDs - pure similarity-based resolution.
+        if medium == Medium.IMAGE:
+            has_photo_subject = any(
+                seed.entity_type == "photo_subject"
+                for seed in entity_seeds
+            )
+            if not has_photo_subject:
+                engine_subject_seed = EntityHypothesis(
+                    entity_type="photo_subject",
+                    entity_nature=EntityNature.INDIVIDUAL,
+                    suggested_name=None,  # Let engine determine via clustering
+                    slots=[],
+                    deterministic_ids=[],  # CRITICAL: No deterministic IDs
+                    confidence=0.6,  # Lower confidence - engine-generated
+                    reasoning="Engine-generated primary subject seed for visual re-ID",
+                )
+                entity_seeds.append(engine_subject_seed)
 
         resolution_result = None
         entities_created = 0
@@ -836,6 +924,58 @@ def show_observation(
                     table.add_row(sig.signature_type, display)
                 console.print(table)
 
+            # Show entity links
+            if obs.entity_links:
+                # Fetch full entity details for display
+                entity_ids = [link.entity_id for link in obs.entity_links]
+                entities_stmt = select(Entity).where(Entity.entity_id.in_(entity_ids))
+                entities_result = await session.execute(entities_stmt)
+                entities_by_id = {e.entity_id: e for e in entities_result.scalars()}
+
+                table = Table(title="Entity Links")
+                table.add_column("Entity ID", style="cyan")
+                table.add_column("Nature")
+                table.add_column("Name")
+                table.add_column("Status")
+                table.add_column("Link")
+                table.add_column("Posterior")
+                table.add_column("Canonical")
+
+                for link in obs.entity_links:
+                    entity = entities_by_id.get(link.entity_id)
+                    # Safe access to enum values
+                    link_status = getattr(link.status, "value", str(link.status))
+                    if entity:
+                        entity_nature = getattr(entity.entity_nature, "value", str(entity.entity_nature))
+                        entity_status = getattr(entity.status, "value", str(entity.status))
+                        canonical = (
+                            str(entity.canonical_entity_id)[:8] + "..."
+                            if entity.canonical_entity_id
+                            else "-"
+                        )
+                        table.add_row(
+                            str(link.entity_id)[:8] + "...",
+                            entity_nature,
+                            entity.name or "-",
+                            entity_status,
+                            link_status,
+                            f"{link.posterior:.2f}",
+                            canonical,
+                        )
+                    else:
+                        table.add_row(
+                            str(link.entity_id)[:8] + "...",
+                            "?",
+                            "?",
+                            "?",
+                            link_status,
+                            f"{link.posterior:.2f}",
+                            "-",
+                        )
+                console.print(table)
+            else:
+                console.print("[dim]No entity links[/dim]")
+
     run_async(_show())
 
 
@@ -921,19 +1061,35 @@ def show_entity(
 
             panel_content = []
             panel_content.append(f"[bold]ID:[/bold] {entity.entity_id}")
+            nature_str = entity.entity_nature.value if entity.entity_nature else "unknown"
+            panel_content.append(f"[bold]Nature:[/bold] {nature_str}")
             panel_content.append(f"[bold]Status:[/bold] {entity.status.value}")
             panel_content.append(f"[bold]Confidence:[/bold] {entity.confidence:.2f}")
+            if entity.name:
+                panel_content.append(f"[bold]Name:[/bold] {entity.name}")
 
             if entity.type:
                 panel_content.append(f"[bold]Type:[/bold] {entity.type.canonical_name}")
 
+            # Prototype status - critical for debugging re-ID
+            panel_content.append("")
+            panel_content.append("[bold]Prototype Status:[/bold]")
+            panel_content.append(f"  • prototype_count: {entity.prototype_count}")
+            has_img = entity.prototype_image_embedding is not None
+            has_txt = entity.prototype_text_embedding is not None
+            panel_content.append(f"  • has_image_prototype: {has_img}")
+            panel_content.append(f"  • has_text_prototype: {has_txt}")
+            if not has_img and not has_txt:
+                panel_content.append("  [yellow]⚠ No prototypes - entity cannot be found via ANN[/yellow]")
+
             if entity.slots:
+                panel_content.append("")
                 panel_content.append("[bold]Slots:[/bold]")
                 for k, v in entity.slots.items():
                     panel_content.append(f"  • {k}: {v}")
 
             linked_count = len(entity.observation_links)
-            panel_content.append(f"[bold]Linked Observations:[/bold] {linked_count}")
+            panel_content.append(f"\n[bold]Linked Observations:[/bold] {linked_count}")
             panel_content.append(f"[bold]Created:[/bold] {entity.created_at}")
 
             console.print(Panel("\n".join(panel_content), title="Entity Details"))

@@ -99,19 +99,23 @@ If the observation contains DETERMINISTIC IDENTIFIERS, extract them:
 - SKU, product_id (strong)
 - UPC, EAN, GTIN, ISBN, ASIN (strong - globally unique)
 - trip_id, booking_id, order_id (strong)
-- GPS coordinates (strong, id_type="gps")
 - SHA256 hash (strong)
 - Filenames, URLs (weak - can change)
+
+**NOT a deterministic ID:**
+- GPS coordinates: These have inherent imprecision (~5-10m) and vary slightly between
+  shots. GPS is a WEAK LOCALITY PRIOR, not an identity anchor. Do NOT include GPS
+  as a deterministic_id. Instead, extract GPS as a facet (latitude, longitude) for
+  context, but let visual similarity drive identity resolution for individuals.
 
 These IDs DOMINATE identity resolution. They anchor entities with posterior=1.0.
 
 **NAMESPACE ASSIGNMENT**: You do NOT need to provide id_namespace - the engine assigns it:
-- gps → geo:wgs84
 - upc/ean/gtin/isbn/asin → global:<id_type>
 - Other IDs → source:<dataset> from ingest context
 
 Just provide id_type and id_value. If you do provide a namespace, it must match:
-source:<dataset>, global:<authority>, geo:wgs84, or user:<tenant>.
+source:<dataset>, global:<authority>, or user:<tenant>.
 
 ## Naming Conventions
 

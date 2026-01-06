@@ -63,6 +63,20 @@ class Settings(BaseSettings):
     # T_margin: If best_score - second_best < this, flag for review
     entity_resolution_t_margin: float = 0.10
 
+    # ── INDIVIDUAL Image Guardrails ───────────────────────────────────────────
+    # These guardrails prevent false merges for INDIVIDUAL entities when only
+    # image embedding is available (sparse signal regime).
+    #
+    # T_img_min: Minimum raw image cosine similarity for ANY merge decision.
+    # Even if composite score is high, reject if image similarity is below this.
+    # This prevents merges based on weak visual evidence.
+    entity_resolution_t_img_min: float = 0.75
+
+    # T_margin_img: Minimum margin between top1 and top2 candidates for image-only.
+    # Larger margin = more confidence that top1 is correct.
+    # If margin is too small, flag for review instead of auto-linking.
+    entity_resolution_t_margin_img: float = 0.08
+
     # ── Namespace Control (bead object-sense-bk9) ────────────────────────────
     # Namespaces are stable system-of-record scopes, NOT arbitrary LLM labels.
     # LLM-invented namespaces cause duplicate entities (SKU "123" in catalog_sku

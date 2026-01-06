@@ -2,8 +2,7 @@
 
 Handles:
 - CAN_EMBED_IMAGE: CLIP visual embeddings
-- CAN_EXTRACT_EXIF: EXIF metadata extraction
-- Deterministic ID extraction from GPS coordinates
+- CAN_EXTRACT_EXIF: EXIF metadata extraction (GPS stored as facet, not ID)
 - CAN_CAPTION: Image captioning (via VLM) - deferred to LLM integration phase
 
 Supports standard image formats (JPEG, PNG, WebP, etc.) and RAW formats
@@ -17,10 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from object_sense.clients.embeddings import EmbeddingClient
-from object_sense.extraction.base import ExtractedId, ExtractionResult
-
-# GPS coordinate precision for deterministic ID (6 decimal places = ~0.1m accuracy)
-GPS_PRECISION = 6
+from object_sense.extraction.base import ExtractionResult
 
 # RAW file extensions that need rawpy processing
 RAW_EXTENSIONS = frozenset({
@@ -43,9 +39,14 @@ class ImageExtractor:
 
     Features extracted:
     - image_embedding: CLIP visual embedding (768-dim)
-    - deterministic_ids: GPS coordinates as (gps, "lat,lon", wgs84) if available
-    - extra.exif: EXIF metadata if available
+    - extra.exif: EXIF metadata if available (including GPS as facet)
     - extra.width/height: Image dimensions
+
+    GPS is extracted as a FACET only, NOT a deterministic ID. GPS coordinates
+    have inherent imprecision (~5-10m even with good signals) and slight
+    variations between shots. Using GPS as a deterministic ID causes false
+    splits (same location = different entities). GPS should be used as a
+    weak similarity boost, not an identity anchor.
 
     Note: Caption extraction (CAN_CAPTION) requires VLM integration,
     which will be added in the LLM integration phase. When captions
@@ -95,41 +96,20 @@ class ImageExtractor:
             if exif_data:
                 result.extra["exif"] = exif_data
 
-                # Extract GPS as deterministic ID if available
-                gps_id = self._extract_gps_id(exif_data)
-                if gps_id:
-                    result.deterministic_ids.append(gps_id)
+                # GPS is stored as facet only, NOT as deterministic ID.
+                # GPS has inherent imprecision and causes false entity splits.
+                # Facets can be used as weak similarity boost signals.
+                if "latitude" in exif_data and "longitude" in exif_data:
+                    result.extra["gps_latitude"] = exif_data["latitude"]
+                    result.extra["gps_longitude"] = exif_data["longitude"]
+                    if "altitude" in exif_data:
+                        result.extra["gps_altitude"] = exif_data["altitude"]
 
             if dimensions:
                 result.extra["width"] = dimensions[0]
                 result.extra["height"] = dimensions[1]
 
         return result
-
-    def _extract_gps_id(self, exif_data: dict[str, Any]) -> ExtractedId | None:
-        """Extract GPS coordinates as a deterministic ID.
-
-        Args:
-            exif_data: Extracted EXIF data with latitude/longitude
-
-        Returns:
-            ExtractedId with (gps, "lat,lon", wgs84) or None if no GPS
-        """
-        lat = exif_data.get("latitude")
-        lon = exif_data.get("longitude")
-
-        if lat is None or lon is None:
-            return None
-
-        # Format as "lat,lon" with fixed precision
-        gps_value = f"{lat:.{GPS_PRECISION}f},{lon:.{GPS_PRECISION}f}"
-
-        return ExtractedId(
-            id_type="gps",
-            id_value=gps_value,
-            id_namespace="wgs84",
-            strength="strong",
-        )
 
     def _extract_raw_thumbnail(
         self, data: bytes
@@ -237,6 +217,15 @@ class ImageExtractor:
                 serialized = self._serialize_exif_value(value)
                 if serialized is not None:
                     exif_dict[tag_name.lower()] = serialized
+
+            # Extract EXIF sub-IFD (contains DateTimeOriginal, etc.)
+            exif_ifd = exif.get_ifd(0x8769)  # EXIF IFD
+            if exif_ifd:
+                for tag_id, value in exif_ifd.items():
+                    tag_name = TAGS.get(tag_id, str(tag_id))
+                    serialized = self._serialize_exif_value(value)
+                    if serialized is not None:
+                        exif_dict[tag_name.lower()] = serialized
 
             # Extract GPS data if present
             gps_ifd = exif.get_ifd(0x8825)  # GPS IFD
