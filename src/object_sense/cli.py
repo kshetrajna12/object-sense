@@ -542,12 +542,13 @@ async def ingest_file(
             session.add(hash_sig)
             signatures_created.append(hash_sig)
 
-        if extraction_result.text_embedding:
+        if extraction_result.text_embedding or extraction_result.clip_text_embedding:
             sig = Signature(
                 signature_id=uuid4(),
                 observation_id=observation_id,
                 signature_type="text_embedding",
                 text_embedding=extraction_result.text_embedding,
+                clip_text_embedding=extraction_result.clip_text_embedding,
             )
             session.add(sig)
             signatures_created.append(sig)

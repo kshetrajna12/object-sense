@@ -348,11 +348,24 @@ class SimilarityScorer:
         obs: ObservationSignals,
         entity: Entity,
     ) -> tuple[float, bool]:
-        """Compute image embedding similarity."""
-        if obs.image_embedding is None or entity.prototype_image_embedding is None:
+        """Compute image embedding similarity.
+
+        Supports cross-modal matching: if obs.image_embedding is unavailable,
+        uses obs.clip_text_embedding which is in the same 768-dim CLIP space.
+        This enables text observations to match against image prototypes.
+        """
+        if entity.prototype_image_embedding is None:
             return 0.0, False
 
-        score = cosine_similarity(obs.image_embedding, list(entity.prototype_image_embedding))
+        # Prefer image embedding, fall back to CLIP text for cross-modal
+        query_embedding = obs.image_embedding
+        if query_embedding is None:
+            query_embedding = obs.clip_text_embedding
+
+        if query_embedding is None:
+            return 0.0, False
+
+        score = cosine_similarity(query_embedding, list(entity.prototype_image_embedding))
         return score, True
 
     def _compute_text_embedding(

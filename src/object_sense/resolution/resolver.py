@@ -734,6 +734,10 @@ class EntityResolver:
     ) -> list[float] | None:
         """Get the appropriate query embedding for a seed.
 
+        Cross-modal matching: For INDIVIDUAL entities, if image_embedding is
+        unavailable (e.g., text observation), use clip_text_embedding which
+        is in the same 768-dim CLIP space as image embeddings.
+
         Args:
             signals: Observation signals.
             seed: Entity hypothesis.
@@ -743,8 +747,11 @@ class EntityResolver:
             Embedding vector or None if unavailable.
         """
         if entity_nature == EntityNature.INDIVIDUAL:
-            # Individuals: prefer image embedding
-            return signals.image_embedding
+            # Individuals: prefer image embedding, fall back to CLIP text for cross-modal
+            if signals.image_embedding is not None:
+                return signals.image_embedding
+            # Cross-modal: use CLIP text embedding (same 768-dim space as image)
+            return signals.clip_text_embedding
         else:
             # Class/Group/Event: prefer text embedding
             return signals.text_embedding
