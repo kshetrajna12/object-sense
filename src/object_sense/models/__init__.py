@@ -5,6 +5,7 @@ from object_sense.models.blob import Blob
 from object_sense.models.entity import Entity
 from object_sense.models.entity_deterministic_id import EntityDeterministicId
 from object_sense.models.entity_evolution import EntityEvolution
+from object_sense.models.event_participant import EventParticipant
 from object_sense.models.enums import (
     EntityEvolutionKind,
     EntityNature,
@@ -36,6 +37,7 @@ __all__ = [
     "EntityDeterministicId",
     "EntityEvolution",
     "EntityEvolutionKind",
+    "EventParticipant",
     "EntityNature",
     "EntityStatus",
     "Evidence",

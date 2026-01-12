@@ -16,6 +16,7 @@ from object_sense.models.enums import LinkRole, LinkStatus, Medium, ObservationS
 if TYPE_CHECKING:
     from object_sense.models.blob import Blob
     from object_sense.models.entity import Entity
+    from object_sense.models.event_participant import EventParticipant
     from object_sense.models.signature import Signature
     from object_sense.models.type import Type
     from object_sense.models.type_candidate import TypeCandidate
@@ -83,6 +84,10 @@ class Observation(Base):
         back_populates="observation"
     )
     signatures: Mapped[list[Signature]] = relationship(back_populates="observation")
+    event_participant_inferences: Mapped[list[EventParticipant]] = relationship(
+        back_populates="source_observation"
+    )
+    """Event participant inferences created from this observation."""
 
 
 class ObservationEntityLink(Base):

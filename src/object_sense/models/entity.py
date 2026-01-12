@@ -18,6 +18,7 @@ from object_sense.models.enums import EntityNature, EntityStatus
 if TYPE_CHECKING:
     from object_sense.models.entity_deterministic_id import EntityDeterministicId
     from object_sense.models.entity_evolution import EntityEvolution
+    from object_sense.models.event_participant import EventParticipant
     from object_sense.models.observation import ObservationEntityLink
     from object_sense.models.type import Type
 
@@ -102,3 +103,14 @@ class Entity(Base):
     deterministic_ids: Mapped[list[EntityDeterministicId]] = relationship(
         back_populates="entity"
     )
+    event_participations: Mapped[list[EventParticipant]] = relationship(
+        back_populates="event_entity",
+        foreign_keys="EventParticipant.event_entity_id",
+    )
+    """Event participations where this entity IS the EVENT."""
+
+    participated_events: Mapped[list[EventParticipant]] = relationship(
+        back_populates="participant_entity",
+        foreign_keys="EventParticipant.participant_entity_id",
+    )
+    """Event participations where this entity IS a PARTICIPANT."""

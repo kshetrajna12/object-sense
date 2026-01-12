@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any, cast
 from uuid import UUID
 
-from object_sense.models.enums import LinkRole
+from object_sense.models.enums import LinkRole, LinkStatus
 
 
 @dataclass
@@ -31,7 +31,7 @@ class PendingLink:
 
     entity_id: UUID
     posterior: float
-    status: str  # 'hard' | 'soft' | 'candidate'
+    status: LinkStatus
     role: LinkRole | None
     flags: list[str] = field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
     seed_index: int | None = None

@@ -10,36 +10,25 @@ Step 4 is split into two phases (see design_v2_corrections.md §2):
 
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, BeforeValidator, Field
+from pydantic import BaseModel, Field
 
 from object_sense.models.enums import EntityNature
-
-
-def _coerce_to_string(v: Any) -> str:
-    """Coerce slot values to strings.
-
-    LLMs may return numeric values (49.99) instead of strings ("49.99").
-    This validator ensures all values become strings for consistent handling.
-    """
-    if v is None:
-        return ""
-    return str(v)
 
 
 class SlotValue(BaseModel):
     """A proposed slot (property) for an observation.
 
     Slots are axes of variation within the same kind of thing.
-    Values can be primitives or references to entities.
+    Values can be primitives (str, int, float, bool, list) or references to entities.
     """
 
     name: str = Field(
         description="Slot name in snake_case (e.g., 'lighting', 'species', 'location')"
     )
-    value: Annotated[str, BeforeValidator(_coerce_to_string)] = Field(
-        description="Slot value as string. For entity references, use 'ref:entity_name'"
+    value: str | int | float | bool | list[str] = Field(
+        description="Slot value. For entity references, use 'ref:entity_name'"
     )
     is_reference: bool = Field(
         default=False,

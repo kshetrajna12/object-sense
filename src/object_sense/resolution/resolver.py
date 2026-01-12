@@ -43,6 +43,7 @@ from object_sense.models.enums import (
     EntityStatus,
     LinkRole,
     LinkStatus,
+    Medium,
 )
 from object_sense.models.identity_conflict import IdentityConflict
 from object_sense.models.observation import Observation, ObservationEntityLink
@@ -212,6 +213,16 @@ class EntityResolver:
             conflicts.extend(seed_result.conflicts)
             evolutions.extend(seed_result.evolutions)
 
+        # Cross-modal EVENT alignment (IMAGE observations only)
+        # Link image observations to existing text-defined EVENTs using
+        # temporal/spatial/species matching. This enables cross-modal coherence
+        # without inventing individuals from text.
+        if observation.medium == Medium.IMAGE:
+            event_links = await self._align_to_events(ctx, pending_links)
+            pending_links.extend(event_links)
+            if event_links:
+                result_flags.append(f"event_aligned:{len(event_links)}")
+
         # Multi-seed consistency pass
         reconciled = reconcile_multi_seed_links(pending_links)
         if reconciled.conflicts_detected > 0:
@@ -324,7 +335,7 @@ class EntityResolver:
                 link = PendingLink(
                     entity_id=lookup_result.entity.entity_id,
                     posterior=1.0,
-                    status="hard",
+                    status=LinkStatus.HARD,
                     role=LinkRole.SUBJECT,  # Default role for observation-level IDs
                     seed_index=-1,  # Not from a seed
                     facets={},
@@ -351,7 +362,7 @@ class EntityResolver:
                 link = PendingLink(
                     entity_id=entity.entity_id,
                     posterior=1.0,
-                    status="hard",
+                    status=LinkStatus.HARD,
                     role=LinkRole.SUBJECT,
                     seed_index=-1,
                     facets={},
@@ -464,7 +475,7 @@ class EntityResolver:
             link = PendingLink(
                 entity_id=lookup_result.entity.entity_id,
                 posterior=1.0,
-                status="hard",
+                status=LinkStatus.HARD,
                 role=self._infer_role(seed),
                 seed_index=seed_idx,
                 facets=_slots_to_dict(seed),
@@ -482,7 +493,7 @@ class EntityResolver:
         link = PendingLink(
             entity_id=entity.entity_id,
             posterior=1.0,
-            status="hard",
+            status=LinkStatus.HARD,
             role=self._infer_role(seed),
             seed_index=seed_idx,
         )
@@ -536,7 +547,7 @@ class EntityResolver:
             link = PendingLink(
                 entity_id=entity.entity_id,
                 posterior=0.8,
-                status="soft",
+                status=LinkStatus.SOFT,
                 role=self._infer_role(seed),
                 flags=["no_embedding_available"],
                 seed_index=seed_idx,
@@ -560,7 +571,7 @@ class EntityResolver:
             link = PendingLink(
                 entity_id=entity.entity_id,
                 posterior=0.8,
-                status="soft",
+                status=LinkStatus.SOFT,
                 role=self._infer_role(seed),
                 flags=["no_candidates_found"],
                 seed_index=seed_idx,
@@ -655,7 +666,7 @@ class EntityResolver:
             link = PendingLink(
                 entity_id=best_candidate.entity.entity_id,
                 posterior=best_score,
-                status="soft",
+                status=LinkStatus.SOFT,
                 role=self._infer_role(seed),
                 seed_index=seed_idx,
             )
@@ -678,13 +689,32 @@ class EntityResolver:
                 best_score,
                 self._t_link,
             )
+
+            # Build explainable flags for candidate link
+            candidate_flags = ["uncertain_match"]
+
+            # Flag high visual similarity (semantic match but uncertain identity)
+            if best_result.image_similarity is not None and best_result.image_similarity >= 0.85:
+                candidate_flags.append("high_visual_similarity")
+
+            # Flag context mismatches (GPS/time disagree despite visual match)
+            signal_scores = best_result.signal_scores
+            if "location" in signal_scores and signal_scores["location"] < 0.3:
+                candidate_flags.append("context_mismatch_gps")
+            if "timestamp" in signal_scores and signal_scores["timestamp"] < 0.3:
+                candidate_flags.append("context_mismatch_time")
+
+            # Flag low evidence
+            if best_result.is_low_evidence:
+                candidate_flags.append("low_evidence")
+
             # Link to best candidate
             link_existing = PendingLink(
                 entity_id=best_candidate.entity.entity_id,
                 posterior=best_score,
-                status="candidate",
+                status=LinkStatus.CANDIDATE,
                 role=self._infer_role(seed),
-                flags=["uncertain_match"],
+                flags=candidate_flags,
                 seed_index=seed_idx,
             )
             links.append(link_existing)
@@ -696,7 +726,7 @@ class EntityResolver:
             link_proto = PendingLink(
                 entity_id=proto.entity_id,
                 posterior=1.0 - best_score,
-                status="candidate",
+                status=LinkStatus.CANDIDATE,
                 role=self._infer_role(seed),
                 flags=["proto_alternative"],
                 seed_index=seed_idx,
@@ -717,7 +747,7 @@ class EntityResolver:
             link = PendingLink(
                 entity_id=proto.entity_id,
                 posterior=0.8,
-                status="soft",
+                status=LinkStatus.SOFT,
                 role=self._infer_role(seed),
                 flags=["no_match_found"],
                 seed_index=seed_idx,
@@ -875,15 +905,15 @@ class EntityResolver:
         should_update = False
         reason = "unknown"
 
-        if link.status == "hard":
+        if link.status == LinkStatus.HARD:
             should_update = True
             reason = "hard_link"
-        elif link.status == "soft" and link.posterior >= self._t_link:
+        elif link.status == LinkStatus.SOFT and link.posterior >= self._t_link:
             should_update = True
             reason = f"soft_above_t_link({self._t_link})"
-        elif link.status == "soft":
+        elif link.status == LinkStatus.SOFT:
             reason = f"soft_below_t_link({link.posterior:.3f}<{self._t_link})"
-        elif link.status == "candidate":
+        elif link.status == LinkStatus.CANDIDATE:
             reason = "candidate_status"
         else:
             reason = f"unhandled_status({link.status})"
@@ -920,7 +950,7 @@ class EntityResolver:
         prototypes as they pollute the ANN pool for visual re-ID.
         """
         # Determine weight for embedding averaging
-        if link.status == "hard":
+        if link.status == LinkStatus.HARD:
             weight = 1.0
         else:
             # Cap soft link weight at 0.5
@@ -984,6 +1014,163 @@ class EntityResolver:
             updated_img,
             updated_txt,
         )
+
+    async def _align_to_events(
+        self,
+        ctx: ResolutionContext,
+        existing_links: list[PendingLink],
+    ) -> list[PendingLink]:
+        """Align image observation to existing EVENT entities.
+
+        Cross-modal EVENT alignment enables linking images to text-defined EVENTs
+        using temporal/spatial/species matching. This provides cross-modal coherence
+        without inventing individuals from text.
+
+        CONSTRAINTS:
+        - Only emits links to EVENT entities (role=CONTEXT)
+        - Does NOT affect INDIVIDUAL resolution or posteriors
+        - Conservative: uncertain matches → candidate/soft links, never hard
+
+        Args:
+            ctx: Resolution context with observation and signals.
+            existing_links: Already-created links (for finding photo_subject).
+
+        Returns:
+            List of PendingLinks to matched EVENT entities.
+        """
+        from datetime import datetime, timezone
+
+        from sqlalchemy import select
+
+        from object_sense.resolution.similarity import haversine_km
+
+        event_links: list[PendingLink] = []
+
+        # Extract observation facets for matching
+        obs_facets = ctx.observation.facets or {}
+
+        # Get observation timestamp (timezone-aware)
+        obs_timestamp = ctx.observation_signals.timestamp
+        obs_date: str | None = None
+        if obs_timestamp:
+            dt = datetime.fromtimestamp(obs_timestamp, tz=timezone.utc)
+            obs_date = dt.strftime("%Y-%m-%d")
+
+        # Get observation GPS
+        obs_gps = ctx.observation_signals.gps_coords
+
+        # Get observation species (from facets: species_* but not *_presence)
+        obs_species: set[str] = set()
+        for key, value in obs_facets.items():
+            if key.startswith("species_") and not key.endswith("_presence") and value:
+                obs_species.add(str(value).lower())
+
+        # Build query with coarse prefilters (by entity_nature and status only)
+        # GPS/date filtering done in Python to avoid JSON column issues
+        stmt = (
+            select(Entity)
+            .where(
+                Entity.entity_nature == EntityNature.EVENT,
+                Entity.canonical_entity_id.is_(None),
+                Entity.status != EntityStatus.DEPRECATED,
+            )
+        )
+
+        # Add date prefilter if observation has date (JSON text comparison)
+        if obs_date:
+            stmt = stmt.where(
+                Entity.slots["event_date"]["value"].astext == obs_date
+            )
+
+        result = await self._session.execute(stmt)
+        candidate_events = result.scalars().all()
+
+        if not candidate_events:
+            return event_links
+
+        # Score each candidate EVENT
+        for event_entity in candidate_events:
+            event_slots = event_entity.slots or {}
+            match_score = 0.0
+            match_signals: list[str] = []
+
+            # Date matching (strong signal) - already prefiltered
+            if obs_date:
+                match_score += 0.4
+                match_signals.append("date_match")
+
+            # Location matching (GPS proximity)
+            if obs_gps:
+                event_lat_slot = event_slots.get("latitude")
+                event_lon_slot = event_slots.get("longitude")
+                if event_lat_slot and event_lon_slot:
+                    try:
+                        # Slots store typed values (float for lat/lon)
+                        lat_val = event_lat_slot.get("value") if isinstance(event_lat_slot, dict) else event_lat_slot
+                        lon_val = event_lon_slot.get("value") if isinstance(event_lon_slot, dict) else event_lon_slot
+                        event_gps = (float(lat_val), float(lon_val))
+                        dist_km = haversine_km(obs_gps, event_gps)
+                        # Within 20km = strong match, decay beyond
+                        if dist_km < 20:
+                            location_score = 0.3 * (1 - dist_km / 20)
+                            match_score += location_score
+                            match_signals.append(f"gps_proximity({dist_km:.1f}km)")
+                    except (ValueError, TypeError):
+                        pass
+
+            # Location name matching (fallback if no GPS on observation)
+            if not obs_gps:
+                event_loc_name = event_slots.get("location_name")
+                if event_loc_name:
+                    loc_name_val = event_loc_name.get("value") if isinstance(event_loc_name, dict) else event_loc_name
+                    obs_loc = obs_facets.get("location_name", "").lower()
+                    if loc_name_val and obs_loc and str(loc_name_val).lower() in obs_loc:
+                        match_score += 0.2
+                        match_signals.append("location_name_match")
+
+            # Species matching (set overlap)
+            if obs_species:
+                event_species_slot = event_slots.get("species")
+                if event_species_slot:
+                    # Slots store typed values (list for species)
+                    species_val = event_species_slot.get("value") if isinstance(event_species_slot, dict) else event_species_slot
+                    if isinstance(species_val, list):
+                        event_species_set = {s.lower() for s in species_val}
+                    else:
+                        event_species_set = {str(species_val).lower()}
+                    overlap = obs_species & event_species_set
+                    if overlap:
+                        match_score += 0.3 * len(overlap) / max(len(obs_species), len(event_species_set))
+                        match_signals.append(f"species_overlap({overlap})")
+
+            # Threshold for alignment (conservative)
+            if match_score >= 0.5:
+                status = LinkStatus.SOFT
+            elif match_score >= 0.3:
+                status = LinkStatus.CANDIDATE
+            else:
+                continue
+
+            link = PendingLink(
+                entity_id=event_entity.entity_id,
+                posterior=match_score,
+                status=status,
+                role=LinkRole.CONTEXT,
+                seed_index=-1,
+                flags=["event_aligned"] + match_signals,
+            )
+            event_links.append(link)
+
+            logger.info(
+                "EVENT alignment: obs=%s → event=%s score=%.3f status=%s signals=%s",
+                ctx.observation.observation_id,
+                event_entity.entity_id,
+                match_score,
+                status.value,
+                match_signals,
+            )
+
+        return event_links
 
     def _weighted_average(
         self,
