@@ -947,6 +947,9 @@ def ingest(
     verbose: Annotated[
         bool, typer.Option("--verbose", "-v", help="Show detailed output")
     ] = False,
+    trace: Annotated[
+        bool, typer.Option("--trace", "-t", help="Show detailed API calls (embeddings, LLM)")
+    ] = False,
     id_namespace: Annotated[
         str | None,
         typer.Option(
@@ -962,6 +965,21 @@ def ingest(
 
     Runs the full pipeline: probe medium → extract features → infer type → resolve entities.
     """
+    # Configure logging if trace mode is enabled
+    if trace:
+        import logging
+        from object_sense import config as config_module
+
+        # Enable API call logging
+        config_module.settings.log_api_calls = True
+
+        # Configure logging format and level
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(message)s",  # Simple format for trace output
+            force=True,  # Override any existing config
+        )
+
     async def _ingest():
         # Initialize database
         await init_db()

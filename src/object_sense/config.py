@@ -16,20 +16,114 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/object_sense"
     database_echo: bool = False
 
-    # Sparkstation LLM Gateway
-    llm_base_url: str = "http://localhost:8000/v1"
-    llm_api_key: str = "dummy-key"
+    # Logging
+    log_level: str = "INFO"  # DEBUG, INFO, WARNING, ERROR
+    log_api_calls: bool = False  # Log detailed API call information (timing, tokens, costs)
 
-    # Model names
-    model_chat: str = "qwen3-vl-4b"  # Vision + chat
-    model_reasoning: str = "gpt-oss-20b"  # Reasoning with traces
-    model_text_embedding: str = "bge-large"  # 1024-dim text embeddings
-    model_image_embedding: str = "clip-vit"  # 768-dim image/text embeddings
+    # ── Provider Configuration ────────────────────────────────────────────────
+    # LLM provider for chat/reasoning: "openai" or "sparkstation"
+    llm_provider: str = "sparkstation"
 
-    # Embedding dimensions (must match models)
-    dim_text_embedding: int = 1024  # bge-large for rich text semantics
-    dim_image_embedding: int = 768  # clip-vit for visual features
-    dim_clip_text_embedding: int = 768  # clip-vit for cross-modal text queries
+    # Embedding provider: "openai" or "sparkstation"
+    # Note: OpenAI doesn't offer image embeddings, so image embeddings always use Sparkstation
+    embedding_provider: str = "sparkstation"
+
+    # ── OpenAI Configuration ──────────────────────────────────────────────────
+    openai_api_key: str = ""  # Set via OPENAI_API_KEY env var
+
+    # Chat/Reasoning models
+    openai_model_chat: str = "gpt-5.2"  # GPT-5.2 for chat/vision
+    openai_model_reasoning: str = "gpt-5.2"  # GPT-5.2 for type inference
+
+    # Text embedding model (for embedding_provider=openai)
+    openai_model_text_embedding: str = "text-embedding-3-large"  # 3072-dim
+    openai_dim_text_embedding: int = 3072  # text-embedding-3-large dimensions
+
+    # ── Sparkstation Configuration ────────────────────────────────────────────
+    sparkstation_base_url: str = "http://localhost:8000/v1"
+    sparkstation_api_key: str = "dummy-key"
+
+    # Chat/Reasoning models
+    sparkstation_model_chat: str = "qwen3-vl-4b"  # Vision + chat
+    sparkstation_model_reasoning: str = "gpt-oss-20b"  # Reasoning with traces
+
+    # Embedding models
+    sparkstation_model_text_embedding: str = "bge-large"  # 1024-dim
+    sparkstation_model_image_embedding: str = "clip-vit"  # 768-dim
+    sparkstation_dim_text_embedding: int = 1024  # bge-large dimensions
+    sparkstation_dim_image_embedding: int = 768  # clip-vit dimensions
+
+    # ── Dynamic Property Accessors ────────────────────────────────────────────
+    @property
+    def llm_base_url(self) -> str:
+        """Get base URL for LLM provider."""
+        if self.llm_provider == "openai":
+            return "https://api.openai.com/v1"
+        return self.sparkstation_base_url
+
+    @property
+    def llm_api_key(self) -> str:
+        """Get API key for LLM provider."""
+        if self.llm_provider == "openai":
+            return self.openai_api_key
+        return self.sparkstation_api_key
+
+    @property
+    def model_chat(self) -> str:
+        """Get chat model for current provider."""
+        if self.llm_provider == "openai":
+            return self.openai_model_chat
+        return self.sparkstation_model_chat
+
+    @property
+    def model_reasoning(self) -> str:
+        """Get reasoning model for current provider."""
+        if self.llm_provider == "openai":
+            return self.openai_model_reasoning
+        return self.sparkstation_model_reasoning
+
+    @property
+    def embedding_base_url(self) -> str:
+        """Get base URL for embedding provider."""
+        if self.embedding_provider == "openai":
+            return "https://api.openai.com/v1"
+        return self.sparkstation_base_url
+
+    @property
+    def embedding_api_key(self) -> str:
+        """Get API key for embedding provider."""
+        if self.embedding_provider == "openai":
+            return self.openai_api_key
+        return self.sparkstation_api_key
+
+    @property
+    def model_text_embedding(self) -> str:
+        """Get text embedding model for current provider."""
+        if self.embedding_provider == "openai":
+            return self.openai_model_text_embedding
+        return self.sparkstation_model_text_embedding
+
+    @property
+    def model_image_embedding(self) -> str:
+        """Get image embedding model (always Sparkstation - cloud providers don't support)."""
+        return self.sparkstation_model_image_embedding
+
+    @property
+    def dim_text_embedding(self) -> int:
+        """Get text embedding dimensions for current provider."""
+        if self.embedding_provider == "openai":
+            return self.openai_dim_text_embedding
+        return self.sparkstation_dim_text_embedding
+
+    @property
+    def dim_image_embedding(self) -> int:
+        """Get image embedding dimensions (always Sparkstation)."""
+        return self.sparkstation_dim_image_embedding
+
+    @property
+    def dim_clip_text_embedding(self) -> int:
+        """Get CLIP text embedding dimensions (always 768 for cross-modal search)."""
+        return 768  # CLIP always uses 768-dim for text/image cross-modal
 
     # ── Type Promotion Thresholds (design_v2_corrections.md §7) ──────────────
     # Promotion happens when ANY of these conditions are met:
