@@ -356,11 +356,18 @@ class TypeInferenceAgent:
                 model, provider, token_info, elapsed
             )
 
-            # Log tool calls if any were made
-            messages = getattr(result, "all_messages", [])
-            tool_calls_count = sum(1 for msg in messages if getattr(msg, "role", None) == "tool")
-            if tool_calls_count > 0:
-                logger.info("[LLM]   ├─ %d tool calls made", tool_calls_count)
+            # Log tool calls if any were made (safe access)
+            try:
+                messages = getattr(result, "all_messages", None)
+                if messages and callable(messages):
+                    messages = messages()
+                if messages:
+                    tool_calls_count = sum(1 for msg in messages if getattr(msg, "role", None) == "tool")
+                    if tool_calls_count > 0:
+                        logger.info("[LLM]   ├─ %d tool calls made", tool_calls_count)
+            except (TypeError, AttributeError):
+                # Ignore errors in tool call counting - it's just nice-to-have logging
+                pass
 
         return result.output
 
