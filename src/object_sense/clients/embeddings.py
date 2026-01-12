@@ -28,10 +28,22 @@ class EmbeddingClient:
         api_key: str | None = None,
         batch_size: int = DEFAULT_BATCH_SIZE,
     ) -> None:
+        # Primary client uses configured embedding provider
         self._client = AsyncOpenAI(
-            base_url=base_url or settings.llm_base_url,
-            api_key=api_key or settings.llm_api_key,
+            base_url=base_url or settings.embedding_base_url,
+            api_key=api_key or settings.embedding_api_key,
         )
+
+        # Image embeddings always use Sparkstation (cloud providers don't support)
+        # Create separate client if text embedding provider is not Sparkstation
+        if settings.embedding_provider != "sparkstation":
+            self._image_client = AsyncOpenAI(
+                base_url=settings.sparkstation_base_url,
+                api_key=settings.sparkstation_api_key,
+            )
+        else:
+            self._image_client = self._client  # Same client for both
+
         self._batch_size = batch_size
 
     async def embed_text(self, texts: Sequence[str]) -> list[list[float]]:
@@ -68,6 +80,7 @@ class EmbeddingClient:
             List of embedding vectors (768 dimensions each).
 
         Note:
+            Image embeddings always use Sparkstation CLIP (cloud providers don't support).
             CLIP requires structured array format: [{"image": "..."}]
         """
         if not images:
@@ -79,7 +92,8 @@ class EmbeddingClient:
             # Convert to CLIP's structured format
             structured_input = self._to_clip_image_input(batch)
 
-            response = await self._client.embeddings.create(
+            # Always use image client (Sparkstation) for CLIP embeddings
+            response = await self._image_client.embeddings.create(
                 model=settings.model_image_embedding,
                 input=structured_input,  # type: ignore[arg-type]
             )
@@ -98,6 +112,9 @@ class EmbeddingClient:
 
         Returns:
             List of embedding vectors (768 dimensions each).
+
+        Note:
+            CLIP text embeddings always use Sparkstation (for cross-modal consistency).
         """
         if not texts:
             return []
@@ -105,7 +122,8 @@ class EmbeddingClient:
         embeddings: list[list[float]] = []
 
         for batch in self._batches(list(texts)):
-            response = await self._client.embeddings.create(
+            # Use image client (Sparkstation) for CLIP cross-modal embeddings
+            response = await self._image_client.embeddings.create(
                 model=settings.model_image_embedding,  # clip-vit for cross-modal
                 input=batch,
             )
