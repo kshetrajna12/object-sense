@@ -18,6 +18,8 @@ The agent:
 
 from __future__ import annotations
 
+import logging
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -32,6 +34,8 @@ from object_sense.inference.schemas import (
     TypeProposal,
     TypeSearchResult,
 )
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from object_sense.extraction.base import ExtractionResult
@@ -331,8 +335,32 @@ class TypeInferenceAgent:
             medium=medium,
         )
 
-        # Run the agent
+        # Run the agent with timing
+        start_time = time.time()
         result = await self._agent.run(prompt, deps=deps)
+        elapsed = (time.time() - start_time) * 1000  # ms
+
+        if settings.log_api_calls:
+            provider = settings.llm_provider
+            model = settings.model_reasoning
+            # Extract token usage if available
+            usage = getattr(result, "usage", None)
+            token_info = ""
+            if usage:
+                total_tokens = getattr(usage, "total_tokens", None)
+                if total_tokens:
+                    token_info = f", {total_tokens} tokens"
+
+            logger.info(
+                "[LLM] %s @ %s → TypeProposal%s (%.0fms)",
+                model, provider, token_info, elapsed
+            )
+
+            # Log tool calls if any were made
+            messages = getattr(result, "all_messages", [])
+            tool_calls_count = sum(1 for msg in messages if getattr(msg, "role", None) == "tool")
+            if tool_calls_count > 0:
+                logger.info("[LLM]   ├─ %d tool calls made", tool_calls_count)
 
         return result.output
 

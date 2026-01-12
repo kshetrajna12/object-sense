@@ -1,12 +1,16 @@
 """Async client wrapper for Sparkstation embedding endpoints."""
 
 import base64
+import logging
+import time
 from collections.abc import Sequence
 from typing import Any
 
 from openai import AsyncOpenAI
 
 from object_sense.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class EmbeddingClient:
@@ -58,6 +62,7 @@ class EmbeddingClient:
         if not texts:
             return []
 
+        start_time = time.time()
         embeddings: list[list[float]] = []
 
         for batch in self._batches(list(texts)):
@@ -67,6 +72,16 @@ class EmbeddingClient:
             )
             # Results are returned in order of input
             embeddings.extend([item.embedding for item in response.data])
+
+        if settings.log_api_calls:
+            elapsed = (time.time() - start_time) * 1000  # ms
+            provider = settings.embedding_provider
+            model = settings.model_text_embedding
+            dims = settings.dim_text_embedding
+            logger.info(
+                "[EMBED] %s @ %s (%d items) → %d-dim (%.0fms)",
+                model, provider, len(texts), dims, elapsed
+            )
 
         return embeddings
 
@@ -86,6 +101,7 @@ class EmbeddingClient:
         if not images:
             return []
 
+        start_time = time.time()
         embeddings: list[list[float]] = []
 
         for batch in self._batches(list(images)):
@@ -98,6 +114,15 @@ class EmbeddingClient:
                 input=structured_input,  # type: ignore[arg-type]
             )
             embeddings.extend([item.embedding for item in response.data])
+
+        if settings.log_api_calls:
+            elapsed = (time.time() - start_time) * 1000  # ms
+            model = settings.model_image_embedding
+            dims = settings.dim_image_embedding
+            logger.info(
+                "[EMBED] %s @ sparkstation (%d images) → %d-dim (%.0fms)",
+                model, len(images), dims, elapsed
+            )
 
         return embeddings
 
@@ -119,6 +144,7 @@ class EmbeddingClient:
         if not texts:
             return []
 
+        start_time = time.time()
         embeddings: list[list[float]] = []
 
         for batch in self._batches(list(texts)):
@@ -128,6 +154,14 @@ class EmbeddingClient:
                 input=batch,
             )
             embeddings.extend([item.embedding for item in response.data])
+
+        if settings.log_api_calls:
+            elapsed = (time.time() - start_time) * 1000  # ms
+            model = settings.model_image_embedding
+            logger.info(
+                "[EMBED] %s @ sparkstation (%d texts, cross-modal) → 768-dim (%.0fms)",
+                model, len(texts), elapsed
+            )
 
         return embeddings
 

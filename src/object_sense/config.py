@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/object_sense"
     database_echo: bool = False
 
+    # Logging
+    log_level: str = "INFO"  # DEBUG, INFO, WARNING, ERROR
+    log_api_calls: bool = False  # Log detailed API call information (timing, tokens, costs)
+
     # ── Provider Configuration ────────────────────────────────────────────────
     # LLM provider for chat/reasoning: "openai" or "sparkstation"
     llm_provider: str = "sparkstation"
