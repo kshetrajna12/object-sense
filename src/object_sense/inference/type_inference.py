@@ -106,6 +106,14 @@ If the observation contains DETERMINISTIC IDENTIFIERS, extract them:
 - SHA256 hash (strong)
 - Filenames, URLs (weak - can change)
 
+**ALREADY HANDLED BY EXTRACTION (do NOT propose these):**
+- Camera serial number (BodySerialNumber) — extracted from EXIF
+- Lens serial number (LensSerialNumber) — extracted from EXIF
+- Image unique ID (ImageUniqueID) — extracted from EXIF
+
+The extraction layer already extracts these with canonical names. Do NOT propose
+camera_serial_number, lens_serial_number, or image_unique_id — they're handled.
+
 **NOT a deterministic ID:**
 - GPS coordinates: These have inherent imprecision (~5-10m) and vary slightly between
   shots. GPS is a WEAK LOCALITY PRIOR, not an identity anchor. Do NOT include GPS
