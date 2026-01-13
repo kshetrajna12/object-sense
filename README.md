@@ -103,6 +103,29 @@ Observations are **inputs**. Entities are **outputs**. Multiple observations can
 
 The engine decides stable types — LLM proposals are evidence, not authority.
 
+### Type Lifecycle
+
+Types follow a two-stage lifecycle with evolution mechanisms:
+
+```
+LLM proposes → TypeCandidate (provisional) → [promote] → Type (stable)
+                                                              ↓
+                                              [alias, merge, split, deprecate]
+```
+
+**Stage 1: TypeCandidates** — LLM proposals, created immediately on first observation. Multiple names may refer to the same concept (`wildlife_photo`, `nature_image`, `animal_pic`).
+
+**Stage 2: Stable Types** — Promoted from candidates when evidence thresholds are met. Support evolution operations:
+
+| Operation | What it does |
+|-----------|--------------|
+| **Alias** | Map multiple names → one canonical type |
+| **Merge** | Combine two types, migrate all observations/entities |
+| **Split** | Divide overloaded type into subtypes |
+| **Deprecate** | Retire type, optionally migrate to replacement |
+
+All evolution operations create audit records in `type_evolution` table.
+
 ### Entity Resolution
 
 Identity resolution uses a priority-based approach:
@@ -196,6 +219,35 @@ uv run object-sense search "leopard"
 
 # System statistics
 uv run object-sense stats
+```
+
+### Type Management
+
+```bash
+# Review provisional type candidates (LLM proposals)
+uv run object-sense review-candidates
+
+# Review stable types
+uv run object-sense review-types
+
+# Manually promote a candidate to stable type
+uv run object-sense type-promote wildlife_photo_observation --force
+
+# Add an alias to a type
+uv run object-sense type-alias wildlife_photo nature_image
+
+# Merge two types (source → target)
+uv run object-sense type-merge nature_image wildlife_photo --dry-run
+uv run object-sense type-merge nature_image wildlife_photo
+
+# Split an overloaded type
+uv run object-sense type-split photo wildlife_photo portrait_photo product_photo
+
+# Deprecate a type (with optional migration)
+uv run object-sense type-deprecate old_type --replacement new_type
+
+# View evolution history
+uv run object-sense type-history wildlife_photo
 ```
 
 ### Management
@@ -334,7 +386,8 @@ src/object_sense/
 │   └── candidate_pool.py  # ANN retrieval
 ├── services/              # Business logic
 │   ├── type_candidate.py  # TypeCandidate lifecycle
-│   └── type_promotion.py  # Candidate → Type promotion
+│   ├── type_promotion.py  # Candidate → Type promotion
+│   └── type_evolution.py  # Type evolution (alias, merge, split, deprecate)
 └── utils/                 # Utilities
     ├── medium.py          # Medium probing, affordances
     └── slots.py           # Slot validation
