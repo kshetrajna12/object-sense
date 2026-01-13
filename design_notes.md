@@ -1320,4 +1320,101 @@ pydantic-ai supports OpenAI-compatible endpoints via model string configuration.
 
 ---
 
+## DECISION: Symbolic Slot Reference Resolution (SlotResolver)
+
+### Context
+
+Entity slots can reference other entities (species, location, predator, etc.). The LLM proposes these as symbolic strings like `ref:class:leopard`. Post entity-resolution, these need upgrading to canonical entity IDs.
+
+### The Problem
+
+1. **LLM produces symbolic refs**: `{"type": "reference", "ref_name": "ref:class:leopard"}`
+2. **Slot Hygiene Contract requires**: `{"ref_entity_id": "<uuid>", "ref_type": "class"}`
+3. **Gap**: Who resolves symbolic → canonical?
+
+### Solution: SlotResolver (post-resolution pass)
+
+A dedicated pass after `EntityResolver.resolve()` that:
+1. Scans entity slots for symbolic refs (`type: "reference"`, `ref_name: "ref:..."`)
+2. Parses ref format: `ref:<nature>:<name>` (e.g., `ref:class:leopard`)
+3. Looks up via deterministic ID (`id_type="ref"`, `id_namespace=<nature>`, `id_value=<normalized_name>`)
+4. If found: resolves to canonical entity (following merge chains)
+5. If not found: creates proto entity (create-on-miss)
+6. Upgrades slot to canonical form, preserving provenance
+
+### Ref Format: `ref:<nature>:<name>`
+
+The namespace encodes entity nature, enabling deterministic validation:
+- `ref:individual:<name>` — a specific instance
+- `ref:class:<name>` — a category or type
+- `ref:group:<name>` — a collection
+- `ref:event:<name>` — an occurrence
+
+**Why namespaced?**
+- SlotResolver can infer `ref_nature` from namespace without domain knowledge
+- Nature mismatch guard: reject resolution if target entity has wrong nature
+- No hardcoded slot-name → nature mappings (domain trap)
+
+### Key Design Principles
+
+1. **No LLM noise in deterministic state**
+   - Don't auto-register ref IDs for all CLASS/GROUP entities
+   - Only register when resolving explicit ref_name (create-on-miss path)
+
+2. **Ref_nature from LLM, not engine**
+   - LLM must emit `ref_nature` field OR use namespaced format
+   - Engine fallback is tiny (only `species`/`category`) — not a domain list
+
+3. **Purely lexical normalization**
+   - Lowercase, trim, non-alnum→underscore, collapse underscores
+   - No semantic normalization ("Panthera pardus" ≠ "leopard")
+
+4. **Preserve provenance**
+   - Keep `ref_raw_name` (original ref:... string)
+   - Keep `ref_debug_name` (normalized display name)
+   - Keep `ref_namespace` (for debugging/queries)
+
+5. **Create-on-miss = PROTO + low confidence**
+   - Slot-created entities aren't authoritative
+   - `status=PROTO`, `confidence=0.7`
+   - Anchored by ref deterministic ID
+
+### Slot Upgrade Format
+
+Before:
+```json
+{"type": "reference", "ref_name": "ref:class:leopard", "ref_nature": "class"}
+```
+
+After:
+```json
+{
+  "type": "reference",
+  "ref_name": "ref:class:leopard",
+  "ref_nature": "class",
+  "ref_entity_id": "ae34a240-13e2-4597-aa23-29cb1e32d99a",
+  "ref_raw_name": "ref:class:leopard",
+  "ref_debug_name": "leopard",
+  "ref_namespace": "class"
+}
+```
+
+### Evidence Predicates
+
+| Predicate | When | Details |
+|-----------|------|---------|
+| `slot_ref_created` | Proto entity created | `{ref_name, entity_id, ref_nature, slot_name}` |
+| `slot_ref_unresolved` | Could not resolve | `{ref_name, reason, slot_name}` |
+| `slot_ref_nature_conflict` | Nature mismatch | `{expected_nature, actual_nature}` |
+
+### Files
+
+- `src/object_sense/resolution/slot_resolver.py` — SlotResolver class
+- `src/object_sense/inference/schemas.py` — SlotValue.ref_nature field
+- `src/object_sense/inference/type_inference.py` — LLM prompt for ref format
+
+**Status:** Implemented. See `object-sense-3we` beads issue.
+
+---
+
 *Notes continue below as discussion progresses...*

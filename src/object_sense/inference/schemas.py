@@ -22,17 +22,36 @@ class SlotValue(BaseModel):
 
     Slots are axes of variation within the same kind of thing.
     Values can be primitives (str, int, float, bool, list) or references to entities.
+
+    For entity references (is_reference=True):
+    - value MUST use the format: ref:<nature>:<name> (e.g., 'ref:class:leopard_species')
+    - ref_nature MUST be provided (individual, class, group, or event)
+
+    The engine resolves ref:... strings to canonical entity IDs after entity resolution.
     """
 
     name: str = Field(
         description="Slot name in snake_case (e.g., 'lighting', 'species', 'location')"
     )
     value: str | int | float | bool | list[str] = Field(
-        description="Slot value. For entity references, use 'ref:entity_name'"
+        description=(
+            "Slot value. For entity references (is_reference=True), use format: "
+            "ref:<nature>:<name> where nature is individual|class|group|event. "
+            "Examples: ref:class:leopard_species, ref:individual:pom_pom_camp, ref:event:hunt_2024"
+        )
     )
     is_reference: bool = Field(
         default=False,
         description="True if this slot references another entity (e.g., species, location)",
+    )
+    ref_nature: EntityNature | None = Field(
+        default=None,
+        description=(
+            "REQUIRED for entity references. The nature of the referenced entity: "
+            "individual (specific instance), class (category/species), "
+            "group (collection), or event (occurrence). "
+            "Must match the nature prefix in the ref:... value."
+        ),
     )
     confidence: float = Field(
         default=0.8, ge=0.0, le=1.0, description="Confidence in this slot assignment"

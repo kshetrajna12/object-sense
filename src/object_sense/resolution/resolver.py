@@ -55,6 +55,7 @@ from object_sense.resolution.reconciliation import (
     reconcile_multi_seed_links,
 )
 from object_sense.resolution.similarity import ObservationSignals, SimilarityScorer
+from object_sense.resolution.slot_resolver import SlotResolver
 from object_sense.utils.slots import normalize_and_record_slot_warnings
 
 if TYPE_CHECKING:
@@ -69,11 +70,19 @@ ALGORITHM_VERSION = "resolver-v1.0"
 
 
 def _slots_to_dict(seed: EntityHypothesis) -> dict[str, Any]:
-    """Convert EntityHypothesis slots to a dictionary."""
+    """Convert EntityHypothesis slots to a dictionary.
+
+    For reference slots, includes ref_nature if provided by the LLM.
+    SlotResolver uses ref_nature to validate and resolve references.
+    """
     result: dict[str, Any] = {}
     for slot in seed.slots:
         if slot.is_reference:
-            result[slot.name] = {"ref_name": slot.value, "type": "reference"}
+            slot_dict: dict[str, Any] = {"ref_name": slot.value, "type": "reference"}
+            # Include ref_nature if provided (required for SlotResolver)
+            if slot.ref_nature is not None:
+                slot_dict["ref_nature"] = slot.ref_nature.value
+            result[slot.name] = slot_dict
         else:
             result[slot.name] = {"value": slot.value}
     return result
@@ -276,6 +285,25 @@ class EntityResolver:
             )
             evolutions.append(evolution)
             self._session.add(evolution)
+
+        # Resolve symbolic slot references (ref_name -> ref_entity_id)
+        # This is a post-pass that upgrades refs to canonical form
+        if entities_created:
+            slot_resolver = SlotResolver(self._session, self._pool)
+            slot_result = await slot_resolver.resolve_entity_slots(
+                entities=entities_created,
+                create_on_miss=True,
+                emit_resolved_evidence=False,  # Don't spam evidence for resolved refs
+            )
+            if slot_result.resolved_count > 0 or slot_result.created_count > 0:
+                logger.info(
+                    "Slot resolution: %d resolved, %d created, %d unresolved",
+                    slot_result.resolved_count,
+                    slot_result.created_count,
+                    slot_result.unresolved_count,
+                )
+            if slot_result.unresolved_count > 0:
+                result_flags.append(f"slot_refs_unresolved:{slot_result.unresolved_count}")
 
         await self._session.flush()
 

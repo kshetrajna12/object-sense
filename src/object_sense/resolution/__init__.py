@@ -9,17 +9,21 @@ Submodules:
 - similarity: Multi-signal similarity scoring with entity_nature weighting
 - reconciliation: Multi-seed consistency pass
 - resolver: Main resolution algorithm
+- slot_resolver: Symbolic slot reference resolution
 """
 
 from object_sense.resolution.candidate_pool import CandidatePoolService
 from object_sense.resolution.reconciliation import reconcile_multi_seed_links
 from object_sense.resolution.resolver import EntityResolver, resolve_canonical_entity
 from object_sense.resolution.similarity import SimilarityScorer
+from object_sense.resolution.slot_resolver import SlotResolver, parse_ref_name
 
 __all__ = [
     "CandidatePoolService",
     "EntityResolver",
     "SimilarityScorer",
+    "SlotResolver",
+    "parse_ref_name",
     "reconcile_multi_seed_links",
     "resolve_canonical_entity",
 ]

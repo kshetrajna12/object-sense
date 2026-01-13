@@ -78,6 +78,22 @@ Your task: Analyze an observation and produce a TypeProposal with two parts:
    - lighting=backlit (slot) not backlit_photo (type)
    - species=leopard (slot referencing entity) not leopard_photo (type)
 
+## Entity Reference Slots (CRITICAL)
+
+When a slot references another entity (is_reference=True), you MUST:
+1. Set ref_nature to the nature of the referenced entity (individual/class/group/event)
+2. Use namespaced ref format: ref:<nature>:<name>
+
+Format: ref:<nature>:<normalized_name>
+- ref:individual:<name> — a specific instance
+- ref:class:<name> — a category or type
+- ref:group:<name> — a collection
+- ref:event:<name> — an occurrence
+
+**ALWAYS include both ref_nature AND the nature prefix in the ref value.**
+The engine uses ref_nature to validate and resolve references. Without it,
+the reference cannot be resolved and will be logged as an error.
+
 ## Entity Nature (CRITICAL)
 
 Every entity hypothesis MUST include entity_nature. This affects how Step 5 resolves it:
