@@ -16,7 +16,16 @@ from pathlib import Path
 from typing import Any
 
 from object_sense.clients.embeddings import EmbeddingClient
-from object_sense.extraction.base import ExtractionResult
+from object_sense.extraction.base import ExtractedId, ExtractionResult
+
+
+# Canonical id_type names for EXIF-based deterministic IDs
+# These are extracted directly from EXIF, NOT via LLM, ensuring consistency
+EXIF_ID_TYPES = {
+    "bodyserialnumber": "camera_serial_number",
+    "lensserialnumber": "lens_serial_number",
+    "imageuniqueid": "image_unique_id",
+}
 
 # RAW file extensions that need rawpy processing
 RAW_EXTENSIONS = frozenset({
@@ -104,6 +113,10 @@ class ImageExtractor:
                     result.extra["gps_longitude"] = exif_data["longitude"]
                     if "altitude" in exif_data:
                         result.extra["gps_altitude"] = exif_data["altitude"]
+
+                # Extract equipment deterministic IDs from EXIF
+                # These are extracted directly with canonical names, NOT via LLM
+                result.deterministic_ids = self._extract_equipment_ids(exif_data)
 
             if dimensions:
                 result.extra["width"] = dimensions[0]
@@ -303,3 +316,39 @@ class ImageExtractor:
             return round(decimal, 6)
         except Exception:
             return None
+
+    def _extract_equipment_ids(self, exif_data: dict[str, Any]) -> list[ExtractedId]:
+        """Extract equipment deterministic IDs from EXIF metadata.
+
+        These are extracted directly with canonical id_type names, bypassing
+        the LLM entirely. This ensures consistent entity resolution for:
+        - Camera body serial numbers
+        - Lens serial numbers
+        - Image unique IDs
+
+        Args:
+            exif_data: Dictionary of EXIF metadata (keys are lowercase).
+
+        Returns:
+            List of ExtractedId objects with canonical id_type names.
+        """
+        ids: list[ExtractedId] = []
+
+        for exif_key, canonical_type in EXIF_ID_TYPES.items():
+            value = exif_data.get(exif_key)
+            if value is not None and str(value).strip():
+                # Normalize the value (strip whitespace, convert to string)
+                normalized_value = str(value).strip()
+
+                # Skip empty or placeholder values
+                if normalized_value and normalized_value != "0":
+                    ids.append(
+                        ExtractedId(
+                            id_type=canonical_type,
+                            id_value=normalized_value,
+                            id_namespace="source:exif",
+                            strength="strong",
+                        )
+                    )
+
+        return ids
