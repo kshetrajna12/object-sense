@@ -61,6 +61,7 @@ from object_sense.models import (
 )
 from object_sense.resolution.resolver import EntityResolver
 from object_sense.services.type_candidate import TypeCandidateService
+from object_sense.services.type_evolution import TypeEvolutionService
 from object_sense.utils.medium import probe_medium
 
 app = typer.Typer(
@@ -1512,6 +1513,75 @@ def show_event(
     run_async(_show())
 
 
+@app.command("review-candidates")
+def review_candidates(
+    status: Annotated[
+        str | None, typer.Option(help="Filter by status (proposed, promoted, merged, rejected)")
+    ] = None,
+    limit: Annotated[int, typer.Option(help="Maximum number to show")] = 20,
+):
+    """Review TypeCandidates (provisional types proposed by LLM).
+
+    TypeCandidates are the first stage of the type lifecycle.
+    They become stable Types after promotion.
+    """
+    from object_sense.models.type_candidate import TypeCandidate
+    from object_sense.models.enums import TypeCandidateStatus
+
+    async def _review():
+        await init_db()
+        async with async_session_factory() as session:
+            stmt = select(TypeCandidate)
+
+            if status:
+                try:
+                    status_enum = TypeCandidateStatus(status)
+                    stmt = stmt.where(TypeCandidate.status == status_enum)
+                except ValueError:
+                    console.print(
+                        "[red]Error:[/red] Invalid status. "
+                        "Use: proposed, promoted, merged, rejected"
+                    )
+                    raise typer.Exit(1) from None
+
+            stmt = stmt.order_by(TypeCandidate.evidence_count.desc()).limit(limit)
+            result = await session.execute(stmt)
+            candidates = result.scalars().all()
+
+            if not candidates:
+                console.print("[yellow]No type candidates found.[/yellow]")
+                return
+
+            table = Table(title="TypeCandidates (Provisional Types)")
+            table.add_column("Name", style="cyan")
+            table.add_column("Status")
+            table.add_column("Evidence", justify="right")
+            table.add_column("Coherence", justify="right")
+            table.add_column("Created")
+
+            for c in candidates:
+                status_style = {
+                    TypeCandidateStatus.PROPOSED: "yellow",
+                    TypeCandidateStatus.PROMOTED: "green",
+                    TypeCandidateStatus.MERGED: "blue",
+                    TypeCandidateStatus.REJECTED: "red",
+                }.get(c.status, "white")
+
+                coherence = f"{c.coherence_score:.2f}" if c.coherence_score else "-"
+                table.add_row(
+                    c.proposed_name,
+                    f"[{status_style}]{c.status.value}[/{status_style}]",
+                    str(c.evidence_count),
+                    coherence,
+                    str(c.created_at)[:10],
+                )
+
+            console.print(table)
+            console.print(f"\n[dim]TypeCandidates become Types after promotion (threshold-based).[/dim]")
+
+    run_async(_review())
+
+
 @app.command("review-types")
 def review_types(
     status: Annotated[
@@ -1519,7 +1589,7 @@ def review_types(
     ] = None,
     limit: Annotated[int, typer.Option(help="Maximum number of types to show")] = 20,
 ):
-    """Review types in the system."""
+    """Review stable Types in the system (promoted from TypeCandidates)."""
     async def _review():
         await init_db()
         async with async_session_factory() as session:
@@ -2036,6 +2106,372 @@ def show_links(
             console.print(f"\n[dim]Showing {len(entities_to_show)} entities. Legend: S=subject, C=context[/dim]")
 
     run_async(_show())
+
+
+# -----------------------------------------------------------------------------
+# Type Evolution Commands
+# -----------------------------------------------------------------------------
+
+
+@app.command("type-alias")
+def type_alias(
+    type_name: Annotated[str, typer.Argument(help="Type canonical name to add alias to")],
+    alias: Annotated[str, typer.Argument(help="New alias to add")],
+    remove: Annotated[bool, typer.Option("--remove", "-r", help="Remove the alias instead")] = False,
+):
+    """Add or remove an alias for a type.
+
+    Example:
+        object-sense type-alias wildlife_photo nature_image
+        object-sense type-alias wildlife_photo animal_pic --remove
+    """
+    async def _alias():
+        await init_db()
+        async with async_session_factory() as session:
+            # Find the type by name
+            stmt = select(Type).where(Type.canonical_name == type_name)
+            result = await session.execute(stmt)
+            type_obj = result.scalar_one_or_none()
+
+            if not type_obj:
+                console.print(f"[red]Error:[/red] Type '{type_name}' not found")
+                raise typer.Exit(1)
+
+            service = TypeEvolutionService(session)
+
+            if remove:
+                evolution_result = await service.remove_alias(type_obj.type_id, alias)
+            else:
+                evolution_result = await service.add_alias(type_obj.type_id, alias)
+
+            if evolution_result.success:
+                await session.commit()
+                action = "removed" if remove else "added"
+                console.print(f"[green]Success:[/green] Alias '{alias}' {action} for {type_name}")
+                console.print(f"Current aliases: {type_obj.aliases}")
+            else:
+                console.print(f"[red]Error:[/red] {evolution_result.reason}")
+                raise typer.Exit(1)
+
+    run_async(_alias())
+
+
+@app.command("type-merge")
+def type_merge(
+    source_type: Annotated[str, typer.Argument(help="Type to merge FROM (will be deprecated)")],
+    target_type: Annotated[str, typer.Argument(help="Type to merge INTO (will remain active)")],
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Show what would happen")] = False,
+):
+    """Merge two types into one.
+
+    The source type is deprecated and all its observations/entities migrate to target.
+    The source's canonical name becomes an alias of the target.
+
+    Example:
+        object-sense type-merge nature_image wildlife_photo
+    """
+    async def _merge():
+        await init_db()
+        async with async_session_factory() as session:
+            # Find both types
+            source_stmt = select(Type).where(Type.canonical_name == source_type)
+            source_result = await session.execute(source_stmt)
+            source = source_result.scalar_one_or_none()
+
+            target_stmt = select(Type).where(Type.canonical_name == target_type)
+            target_result = await session.execute(target_stmt)
+            target = target_result.scalar_one_or_none()
+
+            if not source:
+                console.print(f"[red]Error:[/red] Source type '{source_type}' not found")
+                raise typer.Exit(1)
+            if not target:
+                console.print(f"[red]Error:[/red] Target type '{target_type}' not found")
+                raise typer.Exit(1)
+
+            if dry_run:
+                console.print(f"[blue]Dry run:[/blue] Would merge '{source_type}' into '{target_type}'")
+                console.print(f"  Source evidence count: {source.evidence_count}")
+                console.print(f"  Target evidence count: {target.evidence_count}")
+                console.print(f"  Source aliases: {source.aliases}")
+                console.print(f"  New target aliases would include: {source.canonical_name}")
+                return
+
+            service = TypeEvolutionService(session)
+            merge_result = await service.merge_types(source.type_id, target.type_id)
+
+            if merge_result.success:
+                await session.commit()
+                console.print(f"[green]Success:[/green] Merged '{source_type}' into '{target_type}'")
+                console.print(f"  Observations migrated: {merge_result.observations_migrated}")
+                console.print(f"  Entities migrated: {merge_result.entities_migrated}")
+                console.print(f"  '{source_type}' is now an alias of '{target_type}'")
+            else:
+                console.print(f"[red]Error:[/red] {merge_result.reason}")
+                raise typer.Exit(1)
+
+    run_async(_merge())
+
+
+@app.command("type-split")
+def type_split(
+    source_type: Annotated[str, typer.Argument(help="Type to split")],
+    new_types: Annotated[list[str], typer.Argument(help="Names for new subtypes")],
+    keep_parent: Annotated[
+        bool, typer.Option("--keep-parent", "-k", help="Keep source as parent (don't deprecate)")
+    ] = False,
+):
+    """Split a type into multiple subtypes.
+
+    After split, observations remain on the source type (or need re-classification).
+
+    Example:
+        object-sense type-split photo wildlife_photo portrait_photo product_photo
+        object-sense type-split photo wildlife_photo portrait_photo --keep-parent
+    """
+    async def _split():
+        await init_db()
+        async with async_session_factory() as session:
+            # Find the source type
+            stmt = select(Type).where(Type.canonical_name == source_type)
+            result = await session.execute(stmt)
+            source = result.scalar_one_or_none()
+
+            if not source:
+                console.print(f"[red]Error:[/red] Type '{source_type}' not found")
+                raise typer.Exit(1)
+
+            service = TypeEvolutionService(session)
+            new_type_specs = [{"name": name} for name in new_types]
+            split_result = await service.split_type(
+                source.type_id,
+                new_type_specs,
+                keep_source=keep_parent,
+            )
+
+            if split_result.success:
+                await session.commit()
+                console.print(f"[green]Success:[/green] Split '{source_type}' into {len(new_types)} subtypes")
+                for name in new_types:
+                    console.print(f"  • {name}")
+                if keep_parent:
+                    console.print(f"  '{source_type}' remains as parent type")
+                else:
+                    console.print(f"  '{source_type}' has been deprecated")
+                console.print("\n[dim]Note: Observations remain on original type. Use type-reclassify to redistribute.[/dim]")
+            else:
+                console.print(f"[red]Error:[/red] {split_result.reason}")
+                raise typer.Exit(1)
+
+    run_async(_split())
+
+
+@app.command("type-deprecate")
+def type_deprecate(
+    type_name: Annotated[str, typer.Argument(help="Type to deprecate")],
+    replacement: Annotated[
+        str | None, typer.Option("--replacement", "-r", help="Type to migrate observations to")
+    ] = None,
+):
+    """Deprecate a type (soft delete).
+
+    Optionally migrate all observations/entities to a replacement type.
+
+    Example:
+        object-sense type-deprecate old_type
+        object-sense type-deprecate old_type --replacement new_type
+    """
+    async def _deprecate():
+        await init_db()
+        async with async_session_factory() as session:
+            # Find the type
+            stmt = select(Type).where(Type.canonical_name == type_name)
+            result = await session.execute(stmt)
+            type_obj = result.scalar_one_or_none()
+
+            if not type_obj:
+                console.print(f"[red]Error:[/red] Type '{type_name}' not found")
+                raise typer.Exit(1)
+
+            replacement_id = None
+            if replacement:
+                repl_stmt = select(Type).where(Type.canonical_name == replacement)
+                repl_result = await session.execute(repl_stmt)
+                repl_obj = repl_result.scalar_one_or_none()
+                if not repl_obj:
+                    console.print(f"[red]Error:[/red] Replacement type '{replacement}' not found")
+                    raise typer.Exit(1)
+                replacement_id = repl_obj.type_id
+
+            service = TypeEvolutionService(session)
+            deprecate_result = await service.deprecate_type(
+                type_obj.type_id,
+                replacement_type_id=replacement_id,
+            )
+
+            if deprecate_result.success:
+                await session.commit()
+                console.print(f"[green]Success:[/green] Deprecated '{type_name}'")
+                if replacement:
+                    console.print(f"  Observations migrated: {deprecate_result.observations_migrated}")
+                    console.print(f"  Entities migrated: {deprecate_result.entities_migrated}")
+                    console.print(f"  Migrated to: {replacement}")
+            else:
+                console.print(f"[red]Error:[/red] {deprecate_result.reason}")
+                raise typer.Exit(1)
+
+    run_async(_deprecate())
+
+
+@app.command("type-promote")
+def type_promote(
+    candidate_name: Annotated[str, typer.Argument(help="TypeCandidate name to promote")],
+    force: Annotated[bool, typer.Option("--force", "-f", help="Force promotion even if below threshold")] = False,
+):
+    """Manually promote a TypeCandidate to a stable Type.
+
+    Normally promotion happens automatically when thresholds are met.
+    Use --force to bypass threshold checks.
+
+    Example:
+        object-sense type-promote wildlife_photo_observation --force
+    """
+    from object_sense.models.type_candidate import TypeCandidate
+    from object_sense.models.enums import TypeCandidateStatus
+    from object_sense.services.type_promotion import TypePromotionService
+
+    async def _promote():
+        await init_db()
+        async with async_session_factory() as session:
+            # Find the candidate
+            stmt = select(TypeCandidate).where(TypeCandidate.proposed_name == candidate_name)
+            result = await session.execute(stmt)
+            candidate = result.scalar_one_or_none()
+
+            if not candidate:
+                console.print(f"[red]Error:[/red] TypeCandidate '{candidate_name}' not found")
+                raise typer.Exit(1)
+
+            if candidate.status != TypeCandidateStatus.PROPOSED:
+                console.print(f"[red]Error:[/red] Candidate is '{candidate.status.value}', not 'proposed'")
+                raise typer.Exit(1)
+
+            service = TypePromotionService(session)
+
+            # Check eligibility
+            eligible, reason = await service.check_promotion_eligibility(candidate)
+
+            if not eligible and not force:
+                console.print(f"[yellow]Not eligible:[/yellow] {reason}")
+                console.print("[dim]Use --force to promote anyway[/dim]")
+                raise typer.Exit(1)
+
+            if force and not eligible:
+                # Override eligibility for manual promotion
+                # We need to directly create the type since promote_candidate checks eligibility
+                from object_sense.models.type import Type
+                from object_sense.models.enums import TypeCreatedVia, TypeStatus
+                from uuid import uuid4
+
+                type_id = uuid4()
+                new_type = Type(
+                    type_id=type_id,
+                    canonical_name=candidate.proposed_name,
+                    aliases=[],
+                    parent_type_id=None,
+                    embedding=None,
+                    status=TypeStatus.PROVISIONAL,
+                    evidence_count=candidate.evidence_count,
+                    created_via=TypeCreatedVia.USER_CONFIRMED,
+                )
+                session.add(new_type)
+                candidate.status = TypeCandidateStatus.PROMOTED
+                candidate.promoted_to_type_id = type_id
+
+                await session.commit()
+                console.print(f"[green]Success:[/green] Force-promoted '{candidate_name}' to stable Type")
+                console.print(f"  Type ID: {type_id}")
+            else:
+                promotion_result = await service.promote_candidate(candidate)
+
+                if promotion_result.promoted:
+                    await session.commit()
+                    console.print(f"[green]Success:[/green] Promoted '{candidate_name}' to stable Type")
+                    console.print(f"  Type ID: {promotion_result.type_id}")
+                    console.print(f"  Reason: {promotion_result.reason}")
+                    console.print(f"  Observations updated: {promotion_result.observations_updated}")
+                else:
+                    console.print(f"[red]Error:[/red] {promotion_result.reason}")
+                    raise typer.Exit(1)
+
+    run_async(_promote())
+
+
+@app.command("type-history")
+def type_history(
+    type_name: Annotated[str, typer.Argument(help="Type canonical name")],
+    limit: Annotated[int, typer.Option(help="Maximum records to show")] = 20,
+):
+    """Show evolution history for a type.
+
+    Example:
+        object-sense type-history wildlife_photo
+    """
+    async def _history():
+        await init_db()
+        async with async_session_factory() as session:
+            # Find the type
+            stmt = select(Type).where(Type.canonical_name == type_name)
+            result = await session.execute(stmt)
+            type_obj = result.scalar_one_or_none()
+
+            if not type_obj:
+                console.print(f"[red]Error:[/red] Type '{type_name}' not found")
+                raise typer.Exit(1)
+
+            service = TypeEvolutionService(session)
+            history = await service.get_evolution_history(type_obj.type_id, limit=limit)
+
+            if not history:
+                console.print(f"[yellow]No evolution history for '{type_name}'[/yellow]")
+                return
+
+            table = Table(title=f"Evolution History: {type_name}")
+            table.add_column("Date", width=20)
+            table.add_column("Kind", width=12)
+            table.add_column("Details")
+            table.add_column("Reason")
+
+            for event in history:
+                kind_style = {
+                    "alias": "blue",
+                    "merge": "yellow",
+                    "split": "green",
+                    "deprecate": "red",
+                }.get(event.kind.value, "white")
+
+                details_str = ""
+                if event.details:
+                    # Summarize details
+                    if "alias" in event.details:
+                        details_str = f"alias: {event.details['alias']}"
+                    elif "new_types" in event.details:
+                        details_str = f"→ {', '.join(event.details['new_types'])}"
+                    elif "target_canonical" in event.details:
+                        details_str = f"→ {event.details['target_canonical']}"
+                    else:
+                        details_str = str(event.details)[:40]
+
+                table.add_row(
+                    str(event.created_at)[:19],
+                    f"[{kind_style}]{event.kind.value}[/{kind_style}]",
+                    details_str,
+                    (event.reason or "")[:40],
+                )
+
+            console.print(table)
+
+    run_async(_history())
 
 
 def main():
